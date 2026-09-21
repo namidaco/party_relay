@@ -1,19 +1,19 @@
 {
   "name": "namida-party-relay",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "dev:conformance": "wrangler dev --port 8787 --var MEMBERSHIP:off --var HOST_GRACE_MS:1500 --var PENDING_TIMEOUT_MS:1500 --var JOIN_TIMEOUT_MS:1000 --var SELFHOST_MAX_MEMBERS:4 --var JOIN_RATE_MAX:0",
+    "dev:conformance": "wrangler dev --port 8787 --var MEMBERSHIP:off --var HOST_GRACE_MS:1500 --var PENDING_TIMEOUT_MS:1500 --var JOIN_TIMEOUT_MS:1000 --var SELFHOST_MAX_MEMBERS:4 --var JOIN_RATE_MAX:0 --var DIRECTORY_REFRESH_MS:0 --var LIST_RATE_MAX:0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/vitest-pool-workers": "^0.12.21",
     "typescript": "^5.7.3",
-    "vitest": "^5.0.1",
+    "vitest": "~3.2.0",
     "wrangler": "^4.20.0"
   }
 }

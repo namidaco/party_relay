@@ -1,26 +1,5 @@
-import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { ENV, header, join, makeRoom, parseHeader, wait } from './helpers';
-
-/** Drops everything the room keeps in memory, the way an eviction would. */
-async function evict(code: string): Promise<void> {
-  const ns = ENV.ROOM as unknown as DurableObjectNamespace;
-  const run = runInDurableObject as unknown as (
-    stub: DurableObjectStub,
-    cb: (instance: any) => void,
-  ) => Promise<void>;
-  await run(ns.get(ns.idFromName(code)), (instance: any) => {
-    instance.st = null;
-    instance.members = null;
-    instance.idx = null;
-    instance.atts = new WeakMap();
-    instance.buckets = new WeakMap();
-    instance.gone = new WeakSet();
-    instance.joinHits = new Map();
-    instance.alarmAt = undefined;
-    instance.tmCache = null;
-  });
-}
+import { evictRoom as evict, header, join, makeRoom, parseHeader, wait } from './helpers';
 
 describe('hibernation safety', () => {
   it('keeps routing, membership and host state across an eviction', async () => {

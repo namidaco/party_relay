@@ -15,6 +15,9 @@ export default defineWorkersConfig({
             PENDING_TIMEOUT_MS: '400',
             HOST_GRACE_MS: '300',
             IDLE_TIMEOUT_MS: '1500',
+            DIRECTORY_REFRESH_MS: '400',
+            // the whole suite lists from one ip, the limit is exercised with a per call override
+            LIST_RATE_MAX: '0',
           },
         },
       },

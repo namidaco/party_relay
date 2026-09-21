@@ -12,18 +12,25 @@
   "durable_objects": {
     "bindings": [
       { "name": "ROOM", "class_name": "RoomDO" },
-      { "name": "OWNER", "class_name": "OwnerDO" }
+      { "name": "OWNER", "class_name": "OwnerDO" },
+      { "name": "DIR", "class_name": "DirectoryDO" }
     ]
   },
   // SQLite-backed Durable Objects: available on the free plan.
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RoomDO", "OwnerDO"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RoomDO", "OwnerDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["DirectoryDO"] }
+  ],
 
   "vars": {
     "MEMBERSHIP": "on"
     // "CREATE_PASSWORD": "",         // self-host: require this password to create a room (only when MEMBERSHIP=off)
     // "SELFHOST_MAX_MEMBERS": "100", // self-host member cap
+    // "DIRECTORY": "on",             // "off" drops GET /v1/rooms and every directory push
+    // "LIST_RATE_MAX": "60",         // GET /v1/rooms per ip per minute, "0" disables
     // test/tuning knobs, all milliseconds:
     // "HOST_GRACE_MS": "60000", "PENDING_TIMEOUT_MS": "120000", "JOIN_TIMEOUT_MS": "10000",
-    // "IDLE_TIMEOUT_MS": "600000", "ROOM_LIFETIME_MS": "86400000", "RATE_DROP_CLOSE": "200"
+    // "IDLE_TIMEOUT_MS": "600000", "ROOM_LIFETIME_MS": "86400000", "RATE_DROP_CLOSE": "200",
+    // "DIRECTORY_REFRESH_MS": "60000", "DIRECTORY_TTL_MS": "900000"
   }
 }

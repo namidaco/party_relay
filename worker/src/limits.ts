@@ -17,11 +17,23 @@ export const JOIN_RATE_MAX = 20;
 export const JOIN_RATE_WINDOW = 60_000;
 export const CREATE_RATE_MAX = 10;
 export const CREATE_RATE_WINDOW = 600_000;
+export const LIST_RATE_MAX = 60;
+export const LIST_RATE_WINDOW = 60_000;
 
 export const NAME_MAX = 32;
 export const DID_MAX = 64;
 export const PASSWORD_MAX = 64;
 export const BODY_MAX = 8 * 1024;
+export const SUMMARY_NAME_MAX = 48;
+export const SUMMARY_TEXT_MAX = 80;
+
+/** The one directory instance. */
+export const DIR_NAME = 'global';
+export const DIR_REFRESH_MS = 60_000;
+export const DIR_TTL_MS = 900_000;
+export const DIR_MAX_ENTRIES = 2000;
+export const LIST_LIMIT_DEFAULT = 25;
+export const LIST_LIMIT_MAX = 50;
 
 export const TIER_LIMITS: Record<Exclude<Tier, 'selfhost'>, { max: number; rooms: number }> = {
   cutie: { max: 50, rooms: 2 },
@@ -46,6 +58,20 @@ export function createPasswordOf(env: RelayEnv): string | null {
   return p != null && p.length > 0 ? p : null;
 }
 
+export function directoryOn(env: RelayEnv): boolean {
+  return (env.DIRECTORY ?? 'on').toLowerCase() !== 'off';
+}
+
+export function directoryTtl(env: RelayEnv): number {
+  return num(env.DIRECTORY_TTL_MS, DIR_TTL_MS);
+}
+
+export function listLimit(raw: string | null): number {
+  const n = raw == null ? NaN : Number(raw);
+  if (!Number.isFinite(n)) return LIST_LIMIT_DEFAULT;
+  return Math.min(LIST_LIMIT_MAX, Math.max(1, Math.floor(n)));
+}
+
 export interface Timers {
   join: number;
   pending: number;
@@ -53,6 +79,7 @@ export interface Timers {
   idle: number;
   lifetime: number;
   dropClose: number;
+  refresh: number;
 }
 
 export function timers(env: RelayEnv): Timers {
@@ -63,6 +90,7 @@ export function timers(env: RelayEnv): Timers {
     idle: num(env.IDLE_TIMEOUT_MS, 600_000),
     lifetime: num(env.ROOM_LIFETIME_MS, 86_400_000),
     dropClose: num(env.RATE_DROP_CLOSE, 200),
+    refresh: num(env.DIRECTORY_REFRESH_MS, DIR_REFRESH_MS),
   };
 }
 

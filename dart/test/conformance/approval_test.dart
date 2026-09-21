@@ -28,7 +28,7 @@ void main() {
     final welcome = await guest.expectFrame(Ctrl.welcome);
     guest.adopt(welcome);
     expect(welcome['n'], 2);
-    expect(welcome['opts'], {'approval': true, 'password': false, 'locked': false});
+    expect(welcome['opts'], {'approval': true, 'password': false, 'locked': false, 'public': false});
     final joined = await host.expectFrame(Ctrl.joined);
     expect(joined['n'], 2);
   });

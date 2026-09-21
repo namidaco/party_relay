@@ -25,7 +25,7 @@ void main() {
     expect(host.welcome!['max'], room.max);
     expect(host.welcome!['now'], isA<int>());
     expect(host.welcome!['token'], isNotEmpty);
-    expect(host.welcome!['opts'], {'approval': false, 'password': false, 'locked': false});
+    expect(host.welcome!['opts'], {'approval': false, 'password': false, 'locked': false, 'public': false});
     expect(host.welcome!['members'], [
       {'n': 1, 'name': 'the host'},
     ]);
@@ -76,7 +76,7 @@ void main() {
   test('password rooms', () async {
     final room = await relay.createRoom(password: 'hunter2');
     final host = await relay.join(room.code, token: room.token);
-    expect(host.welcome!['opts'], {'approval': false, 'password': true, 'locked': false});
+    expect(host.welcome!['opts'], {'approval': false, 'password': true, 'locked': false, 'public': false});
 
     final wrong = await relay.connect(room.code);
     wrong.send({'t': Ctrl.join, 'pv': 1, 'name': 'guest', 'did': 'bad-pass', 'password': 'nope'});
@@ -87,7 +87,7 @@ void main() {
     await missing.expectFatal(RelayErrors.badPassword);
 
     final guest = await relay.join(room.code, password: 'hunter2');
-    expect(guest.welcome!['opts'], {'approval': false, 'password': true, 'locked': false});
+    expect(guest.welcome!['opts'], {'approval': false, 'password': true, 'locked': false, 'public': false});
   });
 
   test('full room', () async {

@@ -62,11 +62,18 @@ export function ctEq(a: string, b: string): boolean {
 }
 
 export function cleanText(value: unknown, max: number): string | null {
-  if (typeof value !== 'string') return null;
-  if (value.length > max * 4) return null;
+  const s = cleanOptional(value, max);
+  return typeof s === 'string' ? s : null;
+}
+
+/** Same cleaning, for a field that may be cleared: `undefined` means invalid, `null` means absent or empty. */
+export function cleanOptional(value: unknown, max: number): string | null | undefined {
+  if (value == null) return null;
+  if (typeof value !== 'string') return undefined;
+  if (value.length > max * 4) return undefined;
   const s = value.replace(CONTROL, '').trim();
-  if (s.length < 1 || s.length > max) return null;
-  return s;
+  if (s.length < 1) return null;
+  return s.length > max ? undefined : s;
 }
 
 export function utf8Len(s: string): number {

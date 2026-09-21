@@ -1,8 +1,39 @@
-import { env } from 'cloudflare:test';
+import { env, runInDurableObject } from 'cloudflare:test';
 import worker from '../src/index';
 import type { RelayEnv } from '../src/types';
 
 export const ENV = env as unknown as RelayEnv;
+
+const inDO = runInDurableObject as unknown as (
+  stub: DurableObjectStub,
+  cb: (instance: any, state: DurableObjectState) => unknown,
+) => Promise<void>;
+
+/** Drops everything the room keeps in memory, the way an eviction would. */
+export async function evictRoom(code: string): Promise<void> {
+  const ns = ENV.ROOM as unknown as DurableObjectNamespace;
+  await inDO(ns.get(ns.idFromName(code)), (instance: any) => {
+    instance.st = null;
+    instance.members = null;
+    instance.idx = null;
+    instance.atts = new WeakMap();
+    instance.buckets = new WeakMap();
+    instance.gone = new WeakSet();
+    instance.joinHits = new Map();
+    instance.alarmAt = undefined;
+    instance.tmCache = null;
+  });
+}
+
+/** Empties the shared directory, entries and rate buckets alike. */
+export async function clearDirectory(): Promise<void> {
+  const ns = ENV.DIR as unknown as DurableObjectNamespace;
+  await inDO(ns.get(ns.idFromName('global')), async (instance: any, state: DurableObjectState) => {
+    await state.storage.deleteAll();
+    instance.entries = null;
+    instance.hits = new Map();
+  });
+}
 
 export function wait(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -35,6 +66,15 @@ export async function post(
     },
     overrides,
   );
+  return { status: res.status, body: await res.json() };
+}
+
+export async function list(
+  query = '',
+  overrides?: Partial<RelayEnv>,
+  ip = '10.0.0.1',
+): Promise<{ status: number; body: any }> {
+  const res = await call(`/v1/rooms${query}`, { headers: { 'cf-connecting-ip': ip } }, overrides);
   return { status: res.status, body: await res.json() };
 }
 

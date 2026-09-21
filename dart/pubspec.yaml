@@ -1,6 +1,6 @@
 name: namida_party_relay
 description: WebSocket relay server for namida party sessions. Pure Dart (dart:io), no Flutter, no runtime dependencies.
-version: 1.0.0
+version: 1.1.0
 publish_to: none
 
 environment:

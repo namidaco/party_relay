@@ -39,7 +39,7 @@ void main() {
     await host.expectSilence();
     // -- none of it went through
     final fresh = await relay.join(room.code, name: 'fresh', did: 'did-fresh');
-    expect(fresh.welcome!['opts'], {'approval': false, 'password': false, 'locked': false});
+    expect(fresh.welcome!['opts'], {'approval': false, 'password': false, 'locked': false, 'public': false});
   });
 
   test('kick revokes the token', () async {
@@ -132,7 +132,7 @@ void main() {
     await b.expectFrame(Ctrl.left);
     final resumed = await relay.join(room.code, name: 'a', did: 'did-a', token: a.token);
     expect(resumed.n, a.n);
-    expect(resumed.welcome!['opts'], {'approval': false, 'password': false, 'locked': true});
+    expect(resumed.welcome!['opts'], {'approval': false, 'password': false, 'locked': true, 'public': false});
   });
 
   test('close ends the room', () async {

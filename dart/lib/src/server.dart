@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'config.dart';
+import 'directory.dart';
 import 'envelope.dart';
 import 'ids.dart';
 import 'member.dart';
@@ -25,10 +26,13 @@ class PartyRelayServer {
   PartyRelayServer._(this._http, this.config) {
     _createLimiter = IpRateLimiter(config.createLimit, config.createWindow);
     _joinLimiter = IpRateLimiter(config.joinLimit, config.joinWindow);
+    _listLimiter = IpRateLimiter(config.listLimit, config.listWindow);
+    _directory = RelayDirectory(config, _rooms);
     _pruneTimer = Timer.periodic(config.pruneInterval, (_) {
       final now = DateTime.now().millisecondsSinceEpoch;
       _createLimiter.prune(now);
       _joinLimiter.prune(now);
+      _listLimiter.prune(now);
     });
     _http.listen(_onRequest, onError: (Object _) {}, cancelOnError: false);
   }
@@ -51,6 +55,8 @@ class PartyRelayServer {
   final Set<RelaySocket> _sockets = {};
   late final IpRateLimiter _createLimiter;
   late final IpRateLimiter _joinLimiter;
+  late final IpRateLimiter _listLimiter;
+  late final RelayDirectory _directory;
   Timer? _pruneTimer;
 
   int get port => _http.port;
@@ -59,7 +65,7 @@ class PartyRelayServer {
   bool hasRoom(String code) => _rooms.containsKey(normalizeRoomCode(code) ?? code);
 
   /// in process room creation, no http and no create password.
-  PartyRoomCreated createRoom({required String name, required String did, int pv = 1, bool approval = false, String? password, int? maxMembers}) {
+  PartyRoomCreated createRoom({required String name, required String did, int pv = 1, bool approval = false, String? password, bool public = false, int? maxMembers}) {
     final cleanName = sanitizeName(name);
     if (cleanName == null) throw ArgumentError.value(name, 'name', 'must be 1..$kMaxNameLength chars');
     if (did.isEmpty || did.length > kMaxDidLength) throw ArgumentError.value(did, 'did', 'must be 1..$kMaxDidLength chars');
@@ -67,7 +73,7 @@ class PartyRelayServer {
     if (password != null && (password.isEmpty || password.length > kMaxPasswordLength)) throw ArgumentError.value(password, 'password', 'must be 1..$kMaxPasswordLength chars');
     final limit = config.maxRoomsTotal;
     if (limit != null && _rooms.length >= limit) throw StateError(RelayErrors.roomsLimit);
-    return _open(name: cleanName, did: did, pv: pv, approval: approval, password: password, ip: '', max: maxMembers ?? config.maxMembers);
+    return _open(name: cleanName, did: did, pv: pv, approval: approval, password: password, public: public, ip: '', max: maxMembers ?? config.maxMembers);
   }
 
   Future<void> close() async {
@@ -90,6 +96,7 @@ class PartyRelayServer {
     required int pv,
     required bool approval,
     required String? password,
+    required bool public,
     required String ip,
     required int max,
   }) {
@@ -104,14 +111,17 @@ class PartyRelayServer {
       config: config,
       onGone: (r) {
         if (identical(_rooms[r.code], r)) _rooms.remove(r.code);
+        _directory.invalidate();
       },
       hostName: name,
       hostDid: did,
       hostIp: ip,
       approval: approval,
       password: password,
+      public: public,
     );
     _rooms[code] = room;
+    _directory.invalidate();
     return PartyRoomCreated(code: code, token: room.hostToken, max: max, tier: config.tier);
   }
 
@@ -119,9 +129,16 @@ class PartyRelayServer {
     try {
       final path = req.uri.path;
       if (req.method == 'GET' && path == '/v1/info') {
-        return await _writeJson(req, 200, {'ev': kEnvelopeVersion, 'name': kRelayName, 'membership': config.membership, 'createPassword': config.createPassword != null});
+        return await _writeJson(req, 200, {
+          'ev': kEnvelopeVersion,
+          'name': kRelayName,
+          'membership': config.membership,
+          'createPassword': config.createPassword != null,
+          'directory': config.directoryEnabled,
+        });
       }
       if (req.method == 'POST' && path == '/v1/rooms') return await _postRoom(req);
+      if (req.method == 'GET' && path == '/v1/rooms') return await _listRooms(req);
       final segments = req.uri.pathSegments;
       if (req.method == 'GET' && segments.length == 3 && segments[0] == 'v1' && segments[1] == 'room') return await _upgrade(req, segments[2]);
       await _writeJson(req, 404, {'error': RelayErrors.notFound});
@@ -168,6 +185,7 @@ class PartyRelayServer {
     if (name == null) return _error(req, 400, RelayErrors.badRequest);
 
     var approval = false;
+    var public = false;
     String? password;
     final opts = decoded['opts'];
     if (opts != null) {
@@ -182,6 +200,11 @@ class PartyRelayServer {
         if (p is! String || p.isEmpty || p.length > kMaxPasswordLength) return _error(req, 400, RelayErrors.badRequest);
         password = p;
       }
+      final pub = opts['public'];
+      if (pub != null) {
+        if (pub is! bool) return _error(req, 400, RelayErrors.badRequest);
+        public = pub;
+      }
     }
 
     final createPassword = config.createPassword;
@@ -195,8 +218,24 @@ class PartyRelayServer {
     final limit = config.maxRoomsTotal;
     if (limit != null && _rooms.length >= limit) return _error(req, 429, RelayErrors.roomsLimit);
 
-    final created = _open(name: name, did: did, pv: pv, approval: approval, password: password, ip: ip, max: config.maxMembers);
+    final created = _open(name: name, did: did, pv: pv, approval: approval, password: password, public: public, ip: ip, max: config.maxMembers);
     return _writeJson(req, 200, created.toJson());
+  }
+
+  Future<void> _listRooms(HttpRequest req) async {
+    if (!config.directoryEnabled) return _error(req, 404, RelayErrors.notFound);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (!_listLimiter.allow(_clientIp(req), now)) return _error(req, 429, RelayErrors.rateLimited);
+    int? limit;
+    String? after;
+    if (req.uri.query.isNotEmpty) {
+      try {
+        final query = req.uri.queryParameters;
+        limit = int.tryParse(query['limit'] ?? '');
+        after = query['after'];
+      } catch (_) {}
+    }
+    return _writeJson(req, 200, _directory.page(now, limit, after));
   }
 
   Future<List<int>?> _readBody(HttpRequest req, int max) async {

@@ -5,9 +5,14 @@ import {
   CREATE_RATE_MAX,
   CREATE_RATE_WINDOW,
   DID_MAX,
+  DIR_NAME,
+  LIST_RATE_MAX,
   NAME_MAX,
   PASSWORD_MAX,
   createPasswordOf,
+  directoryOn,
+  directoryTtl,
+  listLimit,
   membershipOn,
   num,
   tierLimits,
@@ -18,6 +23,7 @@ import { cleanText, clientIp, ctEq, json, normalizeCode, roomCode, sha256hex } f
 
 export { RoomDO } from './room';
 export { OwnerDO } from './owner';
+export { DirectoryDO } from './directory';
 
 type Rec = Record<string, unknown>;
 
@@ -54,10 +60,12 @@ async function route(req: Request, env: RelayEnv): Promise<Response> {
       name: 'namida-party',
       membership: membershipOn(env),
       createPassword: createPasswordOf(env) != null,
+      directory: directoryOn(env),
     });
   }
 
   if (path === '/v1/rooms') {
+    if (req.method === 'GET') return await listRooms(req, env);
     if (req.method !== 'POST') return json({ error: 'bad_request' }, 400);
     return await createRoom(req, env);
   }
@@ -76,6 +84,20 @@ async function route(req: Request, env: RelayEnv): Promise<Response> {
   return json({ error: 'not_found' }, 404);
 }
 
+async function listRooms(req: Request, env: RelayEnv): Promise<Response> {
+  if (!directoryOn(env)) return json({ error: 'not_found' }, 404);
+  const q = new URL(req.url).searchParams;
+  const res = await env.DIR.get(env.DIR.idFromName(DIR_NAME)).list({
+    ip: clientIp(req),
+    limit: listLimit(q.get('limit')),
+    after: q.get('after'),
+    ttlMs: directoryTtl(env),
+    rateMax: num(env.LIST_RATE_MAX, LIST_RATE_MAX),
+  });
+  if (res.limited) return json({ error: 'rate_limited' }, 429);
+  return json({ rooms: res.rooms, next: res.next });
+}
+
 async function createRoom(req: Request, env: RelayEnv): Promise<Response> {
   const body = await readBody(req);
   if (!body) return json({ error: 'bad_request' }, 400);
@@ -87,6 +109,7 @@ async function createRoom(req: Request, env: RelayEnv): Promise<Response> {
   if (name == null || did == null) return json({ error: 'bad_request' }, 400);
 
   let approval = false;
+  let pub = false;
   let password: string | null = null;
   if (body.opts != null) {
     if (typeof body.opts !== 'object' || Array.isArray(body.opts)) return json({ error: 'bad_request' }, 400);
@@ -94,6 +117,10 @@ async function createRoom(req: Request, env: RelayEnv): Promise<Response> {
     if (opts.approval != null) {
       if (typeof opts.approval !== 'boolean') return json({ error: 'bad_request' }, 400);
       approval = opts.approval;
+    }
+    if (opts.public != null) {
+      if (typeof opts.public !== 'boolean') return json({ error: 'bad_request' }, 400);
+      pub = opts.public;
     }
     const p = optString(opts.password, PASSWORD_MAX);
     if (p === undefined) return json({ error: 'bad_request' }, 400);
@@ -154,6 +181,8 @@ async function createRoom(req: Request, env: RelayEnv): Promise<Response> {
   const { max, rooms } = tierLimits(env, tier);
   const ownerId = Number.isFinite(rooms) ? identity : null;
   const lifetime = timers(env).lifetime;
+  // stable per creator, a self-host relay has only the device to hash
+  const hid = (await sha256hex(on ? identity : did)).slice(0, 8);
 
   const owner = ownerId != null ? env.OWNER.get(env.OWNER.idFromName(ownerId)) : null;
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -169,9 +198,11 @@ async function createRoom(req: Request, env: RelayEnv): Promise<Response> {
       ip,
       approval,
       password,
+      pub,
       maxMembers: max,
       tier,
       ownerId,
+      hid,
     });
     if (res.ok) return json({ code, token: res.token, max, tier });
     if (owner) await owner.release(code);

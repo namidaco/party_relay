@@ -4,6 +4,7 @@ import {
   BIN_MAX_HOST,
   BURST_GUEST,
   BURST_HOST,
+  DIR_NAME,
   JOIN_RATE_MAX,
   JOIN_RATE_WINDOW,
   MAX_BANS,
@@ -12,6 +13,9 @@ import {
   PASSWORD_MAX,
   REFILL_GUEST,
   REFILL_HOST,
+  SUMMARY_NAME_MAX,
+  SUMMARY_TEXT_MAX,
+  directoryOn,
   num,
   timers,
   type Timers,
@@ -27,10 +31,10 @@ import {
   parseJoin,
   textTooLarge,
 } from './envelope';
-import type { Att, Ban, CreateInit, LeaveReason, MemberRec, RelayEnv, RoomState } from './types';
-import { banId, ctEq, json, randomToken, reqId, sha256hex } from './util';
+import type { Att, Ban, CreateInit, DirEntry, LeaveReason, MemberRec, RelayEnv, RoomState } from './types';
+import { banId, cleanOptional, cleanText, ctEq, json, randomToken, reqId, sha256hex } from './util';
 
-const HOST_ONLY = new Set(['kick', 'unban', 'approve', 'transfer', 'successors', 'opts', 'close']);
+const HOST_ONLY = new Set(['kick', 'unban', 'approve', 'transfer', 'successors', 'opts', 'close', 'summary']);
 
 const TAKE_OK = 0;
 const TAKE_DROP = 1;
@@ -71,11 +75,16 @@ export class RoomDO extends DurableObject<RelayEnv> {
       maxMembers: init.maxMembers,
       tier: init.tier,
       ownerId: init.ownerId,
+      hid: init.hid,
       hostN: 1,
       nextN: 2,
       approval: init.approval,
       pwHash: init.password != null ? await sha256hex(init.password) : null,
       locked: false,
+      pub: init.pub,
+      summary: null,
+      dirAt: null,
+      dirStale: false,
       successors: [],
       bans: [],
       // the creator has not connected yet, the same grace as a host loss applies
@@ -146,6 +155,7 @@ export class RoomDO extends DurableObject<RelayEnv> {
         }
       }
       if (st.hostGraceUntil != null && now >= st.hostGraceUntil) await this.promote(st);
+      if (st.dirStale) await this.pushDir(st, false);
     } finally {
       this.armPaused = false;
     }
@@ -161,6 +171,8 @@ export class RoomDO extends DurableObject<RelayEnv> {
     if (!att) return this.fatal(ws, 'bad_request');
     const joined = att.n != null;
     const isHost = joined && att.n === st.hostN;
+    // a listed room refreshes on traffic it already handles, no alarm of its own
+    if (st.dirAt != null && Date.now() - st.dirAt >= this.tm.refresh) await this.pushDir(st, false);
 
     if (typeof message === 'string') {
       if (textTooLarge(message)) {
@@ -318,6 +330,8 @@ export class RoomDO extends DurableObject<RelayEnv> {
     // replacing a live socket is not a join, the member never left
     if (!replacing) this.broadcast({ t: 'joined', n, name }, n);
     if (isHost && (st.hostN !== prevHostN || !wasHostOnline)) this.broadcast({ t: 'host', n, online: true }, n);
+    // a resumed socket changes nothing the directory shows
+    if (!replacing) await this.pushDir(st, false);
     await this.arm();
   }
 
@@ -352,6 +366,8 @@ export class RoomDO extends DurableObject<RelayEnv> {
         return await this.onSuccessors(ws, st, m);
       case 'opts':
         return await this.onOpts(ws, st, m);
+      case 'summary':
+        return await this.onSummary(ws, st, m);
       case 'close':
         return await this.closeRoom('host');
       default:
@@ -444,6 +460,9 @@ export class RoomDO extends DurableObject<RelayEnv> {
     if ('locked' in m) {
       if (typeof m.locked !== 'boolean') return this.send(ws, { t: 'error', code: 'bad_request' });
     }
+    if ('public' in m) {
+      if (typeof m.public !== 'boolean') return this.send(ws, { t: 'error', code: 'bad_request' });
+    }
     let pwHash: string | null | undefined;
     if ('password' in m) {
       const p = optString(m.password, PASSWORD_MAX);
@@ -452,9 +471,24 @@ export class RoomDO extends DurableObject<RelayEnv> {
     }
     if ('approval' in m) st.approval = m.approval as boolean;
     if ('locked' in m) st.locked = m.locked as boolean;
+    if ('public' in m) st.pub = m.public as boolean;
     if (pwHash !== undefined) st.pwHash = pwHash;
+    await this.syncDir(st, false);
     await this.ctx.storage.put('st', st);
     this.broadcast({ t: 'opts', ...this.opts(st) });
+    await this.arm();
+  }
+
+  private async onSummary(ws: WebSocket, st: RoomState, m: Record<string, unknown>): Promise<void> {
+    const name = cleanText(m.name, SUMMARY_NAME_MAX);
+    const title = cleanOptional(m.title, SUMMARY_TEXT_MAX);
+    const artist = cleanOptional(m.artist, SUMMARY_TEXT_MAX);
+    if (name == null || title === undefined || artist === undefined) {
+      return this.send(ws, { t: 'error', code: 'bad_request' });
+    }
+    st.summary = { name, title, artist };
+    await this.syncDir(st, true);
+    await this.ctx.storage.put('st', st);
   }
 
   // ------------------------------------------------------------- membership
@@ -466,6 +500,7 @@ export class RoomDO extends DurableObject<RelayEnv> {
     const st = this.st ?? (await this.load());
     const att = this.attOf(ws);
     let dirty = false;
+    let left = false;
 
     if (att) {
       if (att.p != null && st) this.notifyHost(st, { t: 'joinreqgone', r: att.p });
@@ -484,6 +519,7 @@ export class RoomDO extends DurableObject<RelayEnv> {
             st.idleSince = Date.now();
             dirty = true;
           }
+          left = true;
         }
       }
     }
@@ -495,6 +531,7 @@ export class RoomDO extends DurableObject<RelayEnv> {
     } catch {
       /* already gone */
     }
+    if (left && st && (await this.syncDir(st, false))) dirty = true;
     if (dirty && st) await this.ctx.storage.put('st', st);
     await this.arm();
   }
@@ -539,6 +576,13 @@ export class RoomDO extends DurableObject<RelayEnv> {
     this.alarmAt = null;
     await this.ctx.storage.deleteAll();
     await this.ctx.storage.deleteAlarm();
+    if (st && st.dirAt != null) {
+      try {
+        await this.env.DIR.get(this.env.DIR.idFromName(DIR_NAME)).remove(st.code);
+      } catch {
+        /* the entry expires on its own */
+      }
+    }
     if (st?.ownerId) {
       try {
         await this.env.OWNER.get(this.env.OWNER.idFromName(st.ownerId)).release(st.code);
@@ -546,6 +590,67 @@ export class RoomDO extends DurableObject<RelayEnv> {
         /* the owner entry expires on its own */
       }
     }
+  }
+
+  // -------------------------------------------------------------- directory
+
+  /** A room is listed while it is public, unlocked, named by a `summary` and has somebody connected. */
+  private listable(st: RoomState): boolean {
+    return st.pub === true && !st.locked && st.summary != null && this.index().size > 0;
+  }
+
+  /**
+   * Pushes or drops the directory entry, at most once every `refresh` unless forced. Returns true when it
+   * changed `st`, which the caller persists.
+   */
+  private async syncDir(st: RoomState, force: boolean): Promise<boolean> {
+    if (!directoryOn(this.env)) return false;
+    const ns = this.env.DIR;
+    if (!this.listable(st)) {
+      if (st.dirAt == null) return false;
+      st.dirAt = null;
+      st.dirStale = false;
+      try {
+        await ns.get(ns.idFromName(DIR_NAME)).remove(st.code);
+      } catch {
+        /* the entry expires on its own */
+      }
+      return true;
+    }
+    const now = Date.now();
+    if (!force && st.dirAt != null && now - st.dirAt < this.tm.refresh) {
+      // coalesced into the next scheduled push
+      if (st.dirStale) return false;
+      st.dirStale = true;
+      return true;
+    }
+    const s = st.summary!;
+    const entry: DirEntry = {
+      code: st.code,
+      name: s.name,
+      hid: st.hid,
+      members: this.index().size,
+      max: st.maxMembers,
+      pv: st.pv,
+      approval: st.approval,
+      password: st.pwHash != null,
+      title: s.title,
+      artist: s.artist,
+      at: now,
+    };
+    try {
+      await ns.get(ns.idFromName(DIR_NAME)).put(entry);
+    } catch {
+      return false; // retried by the next frame
+    }
+    st.dirAt = now;
+    st.dirStale = false;
+    return true;
+  }
+
+  /** `syncDir` for callers that are not writing `st` themselves. */
+  private async pushDir(st: RoomState, force: boolean): Promise<void> {
+    if (await this.syncDir(st, force)) await this.ctx.storage.put('st', st);
   }
 
   // ----------------------------------------------------------------- limits
@@ -674,6 +779,7 @@ export class RoomDO extends DurableObject<RelayEnv> {
     let next = st.createdAt + this.tm.lifetime;
     if (st.idleSince != null) next = Math.min(next, st.idleSince + this.tm.idle);
     if (st.hostGraceUntil != null) next = Math.min(next, st.hostGraceUntil);
+    if (st.dirStale && st.dirAt != null) next = Math.min(next, st.dirAt + this.tm.refresh);
     for (const ws of this.ctx.getWebSockets()) {
       if (this.gone.has(ws)) continue;
       const att = this.attOf(ws);
@@ -689,8 +795,8 @@ export class RoomDO extends DurableObject<RelayEnv> {
 
   // ------------------------------------------------------------------- send
 
-  private opts(st: RoomState): { approval: boolean; password: boolean; locked: boolean } {
-    return { approval: st.approval, password: st.pwHash != null, locked: st.locked };
+  private opts(st: RoomState): { approval: boolean; password: boolean; locked: boolean; public: boolean } {
+    return { approval: st.approval, password: st.pwHash != null, locked: st.locked, public: st.pub === true };
   }
 
   private sendBans(ws: WebSocket, st: RoomState): void {

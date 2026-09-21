@@ -3,13 +3,14 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'config.dart';
+import 'directory.dart';
 import 'envelope.dart';
 import 'ids.dart';
 import 'member.dart';
 
 typedef RoomGone = void Function(RelayRoom room);
 
-class RelayRoom {
+class RelayRoom implements DirectoryRoom {
   RelayRoom({
     required this.code,
     required this.pv,
@@ -21,7 +22,9 @@ class RelayRoom {
     required String hostIp,
     required this.approval,
     required this.password,
-  }) : createdAtMs = DateTime.now().millisecondsSinceEpoch {
+    required this.public,
+  })  : createdAtMs = DateTime.now().millisecondsSinceEpoch,
+        hid = identityHid(hostDid) {
     _members[1] = RelayMember(n: 1, name: hostName, did: hostDid, ip: hostIp, token: newToken());
     hostN = 1;
     _lifeTimer = Timer(config.roomLifetime, () => closeRoom(ClosedReason.expired));
@@ -36,9 +39,13 @@ class RelayRoom {
   final RoomGone onGone;
   final int createdAtMs;
 
+  /// first 8 hex of sha-256 over the creator identity, shown in the directory.
+  final String hid;
+
   bool approval;
   String? password;
   bool locked = false;
+  bool public;
   int? hostN;
   List<int> successors = const [];
 
@@ -48,6 +55,11 @@ class RelayRoom {
   final List<RelayMember> _connected = [];
   final Map<String, PendingJoin> _pending = {};
   final List<BanEntry> _bans = [];
+
+  String? _summaryName;
+  String? _summaryTitle;
+  String? _summaryArtist;
+  DirectoryEntry? _entry;
 
   int _lastN = 1;
   bool _gone = false;
@@ -182,6 +194,7 @@ class RelayRoom {
       case Ctrl.successors:
       case Ctrl.opts:
       case Ctrl.close:
+      case Ctrl.summary:
         final me = s.member;
         if (me == null || me.n != hostN) return s.sendError(RelayErrors.forbidden);
         _handleHostControl(s, type, msg);
@@ -206,6 +219,8 @@ class RelayRoom {
         _opts(s, msg);
       case Ctrl.close:
         closeRoom(ClosedReason.host);
+      case Ctrl.summary:
+        _summary(s, msg);
     }
   }
 
@@ -296,17 +311,67 @@ class RelayRoom {
     final hasApproval = msg.containsKey('approval');
     final hasLocked = msg.containsKey('locked');
     final hasPassword = msg.containsKey('password');
+    final hasPublic = msg.containsKey('public');
     final newApproval = msg['approval'];
     final newLocked = msg['locked'];
     final newPassword = msg['password'];
+    final newPublic = msg['public'];
     if (hasApproval && newApproval is! bool) return s.sendError(RelayErrors.badRequest);
     if (hasLocked && newLocked is! bool) return s.sendError(RelayErrors.badRequest);
+    if (hasPublic && newPublic is! bool) return s.sendError(RelayErrors.badRequest);
     final badPassword = newPassword is! String || newPassword.isEmpty || newPassword.length > kMaxPasswordLength;
     if (hasPassword && newPassword != null && badPassword) return s.sendError(RelayErrors.badRequest);
     if (hasApproval) approval = newApproval! as bool;
     if (hasLocked) locked = newLocked! as bool;
     if (hasPassword) password = newPassword as String?;
+    if (hasPublic) public = newPublic! as bool;
     _broadcast(_optsJson());
+  }
+
+  /// nothing is broadcast, the summary only feeds the directory.
+  void _summary(RelaySocket s, Map<String, Object?> msg) {
+    final rawName = msg['name'];
+    final rawTitle = msg['title'];
+    final rawArtist = msg['artist'];
+    if (rawName is! String) return s.sendError(RelayErrors.badRequest);
+    if (rawTitle != null && rawTitle is! String) return s.sendError(RelayErrors.badRequest);
+    if (rawArtist != null && rawArtist is! String) return s.sendError(RelayErrors.badRequest);
+    final name = sanitizeName(rawName, max: kMaxSummaryNameLength);
+    if (name == null) return s.sendError(RelayErrors.badRequest);
+    final title = rawTitle is String ? sanitizeText(rawTitle, kMaxSummaryTextLength) : null;
+    final artist = rawArtist is String ? sanitizeText(rawArtist, kMaxSummaryTextLength) : null;
+    if (rawTitle is String && title == null) return s.sendError(RelayErrors.badRequest);
+    if (rawArtist is String && artist == null) return s.sendError(RelayErrors.badRequest);
+    _summaryName = name;
+    _summaryTitle = title == null || title.isEmpty ? null : title;
+    _summaryArtist = artist == null || artist.isEmpty ? null : artist;
+  }
+
+  @override
+  DirectoryEntry? get directoryEntry => _entry;
+
+  /// the summary is kept at once, the entry it feeds refreshes at most once per interval.
+  @override
+  bool refreshDirectory(int nowMs) {
+    final entry = _entry;
+    final name = _summaryName;
+    if (_gone || !public || name == null) {
+      if (entry == null) return false;
+      _entry = null;
+      return true;
+    }
+    if (entry != null && nowMs - entry.atMs < config.directoryRefreshInterval.inMilliseconds) return false;
+    final fresh = entry ?? DirectoryEntry(code: code, hid: hid, max: max, pv: pv);
+    fresh.name = name;
+    fresh.title = _summaryTitle;
+    fresh.artist = _summaryArtist;
+    fresh.members = connectedCount;
+    fresh.approval = approval;
+    fresh.password = password != null;
+    fresh.locked = locked;
+    fresh.atMs = nowMs;
+    _entry = fresh;
+    return true;
   }
 
   void handleData(RelaySocket s, Uint8List frame) {
@@ -411,6 +476,7 @@ class RelayRoom {
   void closeRoom(String reason) {
     if (_gone) return;
     _gone = true;
+    _entry = null;
     _graceTimer?.cancel();
     _idleTimer?.cancel();
     _lifeTimer?.cancel();
@@ -437,6 +503,7 @@ class RelayRoom {
   /// drops the socket of every member without notifying, used on server shutdown.
   void dispose() {
     _gone = true;
+    _entry = null;
     _graceTimer?.cancel();
     _idleTimer?.cancel();
     _lifeTimer?.cancel();
@@ -508,7 +575,7 @@ class RelayRoom {
     });
   }
 
-  Map<String, Object?> _optsMap() => {'approval': approval, 'password': password != null, 'locked': locked};
+  Map<String, Object?> _optsMap() => {'approval': approval, 'password': password != null, 'locked': locked, 'public': public};
 
   String _optsJson() => jsonEncode({'t': Ctrl.opts, ..._optsMap()});
 

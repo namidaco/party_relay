@@ -14,9 +14,15 @@ const String kRoomCodeAlphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const int kRoomCodeLength = 8;
 
 const int kMaxNameLength = 32;
+const int kMaxSummaryNameLength = 48;
+const int kMaxSummaryTextLength = 80;
 const int kMaxDidLength = 64;
 const int kMaxPasswordLength = 64;
 const int kMaxTokenLength = 128;
+const int kMaxCursorLength = 64;
+
+/// digest bytes behind the 8 hex chars of a directory `hid`.
+const int kHidBytes = 4;
 
 abstract final class DataRoute {
   /// to the host, `n` ignored.
@@ -44,6 +50,7 @@ abstract final class Ctrl {
   static const String successors = 'successors';
   static const String opts = 'opts';
   static const String close = 'close';
+  static const String summary = 'summary';
   static const String joined = 'joined';
   static const String left = 'left';
   static const String host = 'host';

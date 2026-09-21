@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'envelope.dart';
+import 'sha256.dart';
 
 final Random _secure = Random.secure();
 
@@ -39,14 +40,22 @@ bool constantTimeEquals(String a, String b) {
   return diff == 0;
 }
 
-/// trimmed, control chars stripped, null when outside 1..[kMaxNameLength].
-String? sanitizeName(String raw) {
-  if (raw.length > kMaxNameLength * 8) return null;
+/// trimmed, control chars stripped, null when longer than [max].
+String? sanitizeText(String raw, int max) {
+  if (raw.length > max * 8) return null;
   final out = StringBuffer();
   for (final rune in raw.runes) {
     if (rune >= 0x20 && rune != 0x7F) out.writeCharCode(rune);
   }
-  final name = out.toString().trim();
-  if (name.isEmpty || name.length > kMaxNameLength) return null;
-  return name;
+  final text = out.toString().trim();
+  return text.length > max ? null : text;
 }
+
+/// [sanitizeText] that also rejects empty, null when outside 1..[max].
+String? sanitizeName(String raw, {int max = kMaxNameLength}) {
+  final name = sanitizeText(raw, max);
+  return name == null || name.isEmpty ? null : name;
+}
+
+/// `hid`, the first 8 hex of sha-256 over the room owner identity.
+String identityHid(String identity) => sha256Hex(utf8.encode(identity), kHidBytes);

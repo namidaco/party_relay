@@ -4,14 +4,14 @@ import { call, connect, makeRoom, post } from './helpers';
 describe('GET /v1/info', () => {
   it('reports the relay config', async () => {
     const off = await (await call('/v1/info')).json<any>();
-    expect(off).toEqual({ ev: 1, name: 'namida-party', membership: false, createPassword: false });
+    expect(off).toEqual({ ev: 1, name: 'namida-party', membership: false, createPassword: false, directory: true });
 
     const on = await (await call('/v1/info', undefined, { MEMBERSHIP: 'on' })).json<any>();
     expect(on.membership).toBe(true);
     expect(on.createPassword).toBe(false);
 
     const pw = await (await call('/v1/info', undefined, { CREATE_PASSWORD: 'x' })).json<any>();
-    expect(pw).toEqual({ ev: 1, name: 'namida-party', membership: false, createPassword: true });
+    expect(pw).toEqual({ ev: 1, name: 'namida-party', membership: false, createPassword: true, directory: true });
   });
 
   it('answers OPTIONS', async () => {

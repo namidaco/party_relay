@@ -12,7 +12,7 @@ describe('join', () => {
       hostOnline: true,
       pv: 1,
       max: 100,
-      opts: { approval: false, password: false, locked: false },
+      opts: { approval: false, password: false, locked: false, public: false },
       members: [{ n: 1, name: 'host' }],
     });
     expect(welcome.token).toBe(room.token);
@@ -85,7 +85,7 @@ describe('join', () => {
     const guest = await join(room.code, { name: 'g' });
     await host.sock.next();
     host.sock.send({ t: 'opts', locked: true });
-    expect(await host.sock.next()).toEqual({ t: 'opts', approval: false, password: false, locked: true });
+    expect(await host.sock.next()).toEqual({ t: 'opts', approval: false, password: false, locked: true, public: false });
     await guest.sock.next();
 
     const blocked = await join(room.code, { name: 'g2', did: 'g2' });
@@ -301,9 +301,9 @@ describe('host commands', () => {
     const room = await makeRoom({ opts: { password: 'a' } });
     const host = await join(room.code, { token: room.token });
     host.sock.send({ t: 'opts', approval: true });
-    expect(await host.sock.next()).toEqual({ t: 'opts', approval: true, password: true, locked: false });
+    expect(await host.sock.next()).toEqual({ t: 'opts', approval: true, password: true, locked: false, public: false });
     host.sock.send({ t: 'opts', password: null });
-    expect(await host.sock.next()).toEqual({ t: 'opts', approval: true, password: false, locked: false });
+    expect(await host.sock.next()).toEqual({ t: 'opts', approval: true, password: false, locked: false, public: false });
     host.sock.send({ t: 'opts', approval: 'yes' });
     expect(await host.sock.next()).toEqual({ t: 'error', code: 'bad_request' });
     host.sock.send({ t: 'opts', password: '' });

@@ -15,11 +15,12 @@ All times are unix epoch milliseconds. All JSON keys are as written here. Unknow
 ### `GET /v1/info`
 
 ```json
-{"ev": 1, "name": "namida-party", "membership": true, "createPassword": false}
+{"ev": 1, "name": "namida-party", "membership": true, "createPassword": false, "directory": true}
 ```
 
 `membership`: room creation needs a namida membership proof. `createPassword`: room creation needs the server password
-(self-host option). Both false = anyone can create.
+(self-host option). Both false = anyone can create. `directory`: this relay serves `GET /v1/rooms`; a client must treat
+a missing field or a 404 from that path as "no browsing here".
 
 ### `POST /v1/rooms` create a room
 
@@ -31,7 +32,7 @@ Request:
   "name": "host display name",
   "did": "device id",
   "auth": {"kind": "patreon", "token": "<patreon access token>"},
-  "opts": {"approval": false, "password": null}
+  "opts": {"approval": false, "password": null, "public": false}
 }
 ```
 
@@ -41,6 +42,8 @@ Request:
 - `pv` party (app protocol) version, integer >= 1. Stored on the room, joins must match exactly.
 - `name` 1..32 chars after trim, control chars stripped. `did` 1..64 chars.
 - `opts.password` null or 1..64 chars.
+- `opts.public` listed in the directory. Default false, and a public room only shows up once its host has sent a
+  `summary` (below) carrying a room name.
 
 Response `200`:
 
@@ -67,6 +70,35 @@ Tier limits (worker): cutie 50 members / 2 rooms, pookie 100 / 3, patootie 200 /
 config, default 100 members, unlimited rooms.
 
 Create attempts are limited to 10 per ip per 10 minutes.
+
+### `GET /v1/rooms` browse public rooms
+
+Served only when `/v1/info` reports `"directory": true`, otherwise `404 {"error":"not_found"}`. Unauthenticated.
+
+Query: `limit` 1..50 (default 25), `after` a cursor from a previous page. A `limit` out of range or unparsable is
+clamped rather than refused, and an unparsable `after` returns the first page. `next` is opaque, clients only echo it
+back, and it is null on the last page.
+
+```json
+{
+  "rooms": [
+    {"code": "K7Q2MXPD", "name": "chill", "hid": "3f9a1c07", "members": 4, "max": 50, "pv": 1,
+     "approval": false, "password": false, "title": "Song title", "artist": "Artist", "at": 1790000000000}
+  ],
+  "next": null
+}
+```
+
+- `hid` is the first 8 hex of SHA-256 of the room owner's identity (`patreon:<id>`, `supabase:<id>`, or the host's
+  `did` when membership is off). It is stable per creator and reveals nothing; clients use it to hide a creator's
+  rooms locally.
+- `title` / `artist` are absent when the host has not sent them, or cleared them.
+- `at` is when the entry was last refreshed. `members` can lag by up to the relay's refresh interval (60s by default).
+- Listed: public rooms with a name, at least one connected member, and `locked` false. Everything else is invisible,
+  including unlisted rooms, so a code is never guessable from this endpoint.
+- Order: `members` descending, then `at` descending, then `code`. Stable enough for `next` to page through.
+- Entries expire 15 minutes after their last refresh, so a relay that loses a room never lists a ghost.
+- Rate limited to 60 requests per ip per minute, over that gives `429 {"error":"rate_limited"}`.
 
 ### `GET /v1/room/<CODE>` websocket upgrade
 
@@ -97,13 +129,19 @@ Server replies with one of:
 
 ```json
 {"t": "welcome", "n": 3, "token": "<member token>", "host": 1, "hostOnline": true, "pv": 1, "max": 50, "now": 1790000000000,
- "opts": {"approval": false, "password": false, "locked": false},
+ "opts": {"approval": false, "password": false, "locked": false, "public": false},
  "members": [{"n": 1, "name": "host"}, {"n": 3, "name": "display name"}]}
 ```
 
 ```json
 {"t": "pending"}
 ```
+
+`summary` fields: `name` 1..48 chars after trim, required, control chars stripped. `title` and `artist` are optional,
+0..80 chars each. A summary is a whole now-playing snapshot, not a partial update like `opts`, so an absent, null or
+empty `title`/`artist` clears it. A summary from a non-host gets `error forbidden`. The relay
+keeps the latest one and refreshes the directory entry at most once every 60s (configurable), except when the room
+becomes public, unlisted or closed, which apply at once.
 
 `pending`: the room needs host approval, the socket stays open and gets `welcome` or a fatal `error rejected` later.
 Pending requests time out after 120s (`error timeout`). If the host is offline, `error host_offline`.
@@ -135,8 +173,9 @@ Anyone else sending these gets a non fatal `error forbidden`.
 | `{"t":"approve","r":"<req id>","ok":true}` | resolves a pending join |
 | `{"t":"transfer","n":3}` | makes a connected member the host. everyone gets `host` |
 | `{"t":"successors","ns":[3,5]}` | ordered preference for automatic promotion |
-| `{"t":"opts","approval":true,"password":"x","locked":false}` | partial update, `password: null` clears. everyone gets `opts` |
+| `{"t":"opts","approval":true,"password":"x","locked":false,"public":true}` | partial update, `password: null` clears. everyone gets `opts` |
 | `{"t":"close"}` | everyone gets `closed r:"host"`, sockets closed, room deleted |
+| `{"t":"summary","name":"..","title":"..","artist":".."}` | what `GET /v1/rooms` shows for this room. Nothing is broadcast |
 
 After `kick` with ban / `unban`, the host gets `{"t":"bans","list":[{"id":"..","name":".."}]}`. The host also gets it
 right after its `welcome` when the list is not empty.

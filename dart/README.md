@@ -26,10 +26,21 @@ dart compile exe bin/relay.dart -o relay && ./relay --port 8787
 | `--max-members <n>` | `MAX_MEMBERS` | 100 |
 | `--max-rooms <n>` | `MAX_ROOMS` | unlimited |
 | `--trust-proxy` | `TRUST_PROXY_HEADERS` | false |
+| `--no-directory` | `DIRECTORY` | directory on (`GET /v1/rooms` served) |
 
 Timers and limits, for tests and tuning: `HOST_GRACE_MS` (60000), `PENDING_TIMEOUT_MS` (120000), `JOIN_TIMEOUT_MS`
 (10000), `IDLE_TIMEOUT_MS` (600000), `ROOM_LIFETIME_MS` (86400000), `CREATE_LIMIT` (10 per ip per 10 min),
-`JOIN_LIMIT` (20 per ip per min), `RATE_DROP_CLOSE` (200 dropped frames per minute closes the socket).
+`JOIN_LIMIT` (20 per ip per min), `LIST_LIMIT` (60 per ip per `LIST_WINDOW_MS`, 60000), `DIRECTORY_REFRESH_MS`
+(60000, how stale a listed room's `members`/`at` may be), `DIRECTORY_TTL_MS` (900000, an entry not refreshed for
+that long stops being listed), `RATE_DROP_CLOSE` (200 dropped frames per minute closes the socket).
+
+## Public rooms
+
+`GET /v1/rooms` lists the rooms created with `opts.public` whose host has sent a `summary` frame, have at least one
+connected member and are not locked. The rest, including every unlisted room, is invisible, so a code can never be
+guessed from it. The listing is derived from the live rooms, an entry refreshes at most once per
+`DIRECTORY_REFRESH_MS` (becoming public, unlisted or closed applies at once) and `hid` is the first 8 hex of the
+sha-256 of the creator `did`.
 
 ## In the app
 
@@ -92,6 +103,7 @@ suite (one ip) trips the create/join limits:
 
 ```
 HOST_GRACE_MS=1500 PENDING_TIMEOUT_MS=1500 JOIN_TIMEOUT_MS=1000 MAX_MEMBERS=4 CREATE_LIMIT=100000 JOIN_LIMIT=100000
+LIST_LIMIT=100000 DIRECTORY=true DIRECTORY_REFRESH_MS=0
 ```
 
 plus no membership and no create password. `RATE_DROP_CLOSE` (default 200) may be lowered to make the rate limit test

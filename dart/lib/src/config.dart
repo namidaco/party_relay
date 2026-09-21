@@ -24,6 +24,13 @@ class PartyRelayConfig {
     this.createWindow = const Duration(minutes: 10),
     this.joinLimit = 20,
     this.joinWindow = const Duration(minutes: 1),
+    this.listLimit = 60,
+    this.listWindow = const Duration(minutes: 1),
+    this.directoryEnabled = true,
+    this.directoryRefreshInterval = const Duration(seconds: 60),
+    this.directoryEntryTtl = const Duration(minutes: 15),
+    this.directoryListLimit = 50,
+    this.directoryPageSize = 25,
     this.maxPendingPerRoom = 20,
     this.maxBansPerRoom = 500,
     this.maxRetainedMembers = 200,
@@ -77,6 +84,23 @@ class PartyRelayConfig {
   final int joinLimit;
   final Duration joinWindow;
 
+  /// `GET /v1/rooms` requests per ip per [listWindow].
+  final int listLimit;
+  final Duration listWindow;
+
+  /// serve `GET /v1/rooms` and advertise it in `/v1/info`.
+  final bool directoryEnabled;
+
+  /// a listed room refreshes its `members`/`at` at most this often, so the numbers may lag.
+  final Duration directoryRefreshInterval;
+
+  /// an entry not refreshed for this long stops being listed.
+  final Duration directoryEntryTtl;
+
+  /// highest and default `limit` of a listing page.
+  final int directoryListLimit;
+  final int directoryPageSize;
+
   final int maxPendingPerRoom;
   final int maxBansPerRoom;
 
@@ -118,6 +142,11 @@ class PartyRelayConfig {
       createPassword: password != null && password.isNotEmpty ? password : null,
       createLimit: count('CREATE_LIMIT', def.createLimit),
       joinLimit: count('JOIN_LIMIT', def.joinLimit),
+      listLimit: count('LIST_LIMIT', def.listLimit),
+      listWindow: ms('LIST_WINDOW_MS', def.listWindow),
+      directoryEnabled: env['DIRECTORY'] != 'false' && env['DIRECTORY'] != '0',
+      directoryRefreshInterval: ms('DIRECTORY_REFRESH_MS', def.directoryRefreshInterval),
+      directoryEntryTtl: ms('DIRECTORY_TTL_MS', def.directoryEntryTtl),
       rateDropClose: count('RATE_DROP_CLOSE', def.rateDropClose),
       trustProxyHeaders: env['TRUST_PROXY_HEADERS'] == 'true' || env['TRUST_PROXY_HEADERS'] == '1',
     );
@@ -148,6 +177,13 @@ class PartyRelayConfig {
     Duration? createWindow,
     int? joinLimit,
     Duration? joinWindow,
+    int? listLimit,
+    Duration? listWindow,
+    bool? directoryEnabled,
+    Duration? directoryRefreshInterval,
+    Duration? directoryEntryTtl,
+    int? directoryListLimit,
+    int? directoryPageSize,
     int? maxPendingPerRoom,
     int? maxBansPerRoom,
     int? maxRetainedMembers,
@@ -179,6 +215,13 @@ class PartyRelayConfig {
       createWindow: createWindow ?? this.createWindow,
       joinLimit: joinLimit ?? this.joinLimit,
       joinWindow: joinWindow ?? this.joinWindow,
+      listLimit: listLimit ?? this.listLimit,
+      listWindow: listWindow ?? this.listWindow,
+      directoryEnabled: directoryEnabled ?? this.directoryEnabled,
+      directoryRefreshInterval: directoryRefreshInterval ?? this.directoryRefreshInterval,
+      directoryEntryTtl: directoryEntryTtl ?? this.directoryEntryTtl,
+      directoryListLimit: directoryListLimit ?? this.directoryListLimit,
+      directoryPageSize: directoryPageSize ?? this.directoryPageSize,
       maxPendingPerRoom: maxPendingPerRoom ?? this.maxPendingPerRoom,
       maxBansPerRoom: maxBansPerRoom ?? this.maxBansPerRoom,
       maxRetainedMembers: maxRetainedMembers ?? this.maxRetainedMembers,

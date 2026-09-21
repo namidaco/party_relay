@@ -14,10 +14,11 @@ usage: relay [options]
   --max-members <n>      members per room (env MAX_MEMBERS, default 100)
   --max-rooms <n>        open rooms on this relay (env MAX_ROOMS, default unlimited)
   --trust-proxy          read the client ip from X-Forwarded-For / CF-Connecting-IP (env TRUST_PROXY_HEADERS)
+  --no-directory         stop serving GET /v1/rooms, public rooms are not browsable (env DIRECTORY=false)
   -h, --help             this text
 
 timers can be overridden for tests: HOST_GRACE_MS, PENDING_TIMEOUT_MS, JOIN_TIMEOUT_MS, IDLE_TIMEOUT_MS,
-ROOM_LIFETIME_MS, RATE_DROP_CLOSE.
+ROOM_LIFETIME_MS, RATE_DROP_CLOSE, DIRECTORY_REFRESH_MS, DIRECTORY_TTL_MS, LIST_LIMIT, LIST_WINDOW_MS.
 ''';
 
 Future<void> main(List<String> args) async {
@@ -38,8 +39,8 @@ Future<void> main(List<String> args) async {
     final equals = arg.indexOf('=');
     if (equals > 0) {
       flags[arg.substring(2, equals)] = arg.substring(equals + 1);
-    } else if (arg == '--trust-proxy') {
-      booleans.add('trust-proxy');
+    } else if (arg == '--trust-proxy' || arg == '--no-directory') {
+      booleans.add(arg.substring(2));
     } else if (i + 1 < args.length) {
       flags[arg.substring(2)] = args[++i];
     } else {
@@ -58,6 +59,7 @@ Future<void> main(List<String> args) async {
     maxMembers: maxMembers != null && maxMembers > 0 ? maxMembers : null,
     maxRoomsTotal: maxRooms != null && maxRooms > 0 ? maxRooms : null,
     trustProxyHeaders: booleans.contains('trust-proxy') ? true : null,
+    directoryEnabled: booleans.contains('no-directory') ? false : null,
   );
 
   final host = flags['host'] ?? env['HOST'] ?? '0.0.0.0';
@@ -73,7 +75,7 @@ Future<void> main(List<String> args) async {
   }
 
   stdout.writeln('namida party relay listening on http://$host:${server.port} (max ${config.maxMembers} members/room, '
-      'rooms ${config.maxRoomsTotal ?? 'unlimited'}, create password ${config.createPassword != null})');
+      'rooms ${config.maxRoomsTotal ?? 'unlimited'}, create password ${config.createPassword != null}, directory ${config.directoryEnabled})');
 
   final done = Completer<void>();
   void stop(ProcessSignal _) {

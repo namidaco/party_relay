@@ -14,6 +14,9 @@ const int kJoinTimeoutMs = 1000;
 const int kConformanceMaxMembers = 4;
 const int kIpLimit = 100000;
 
+/// the directory must not throttle its entries, the suite asserts right after every change.
+const int kDirectoryRefreshMs = 0;
+
 final int kRateDropClose = int.tryParse(Platform.environment['RATE_DROP_CLOSE'] ?? '') ?? 200;
 
 const Duration kGrace = Duration(milliseconds: kHostGraceMs);
@@ -29,7 +32,9 @@ PartyRelayConfig conformanceConfig() => PartyRelayConfig(
       maxMembers: kConformanceMaxMembers,
       createLimit: kIpLimit,
       joinLimit: kIpLimit,
+      listLimit: kIpLimit,
       rateDropClose: kRateDropClose,
+      directoryRefreshInterval: Duration.zero,
     );
 
 Uint8List pattern(int length) => Uint8List.fromList(List<int>.generate(length, (i) => (i * 31 + 7) & 0xFF));
@@ -61,6 +66,23 @@ class HttpResult {
   final int status;
   final Map<String, dynamic> body;
   String? get error => body['error'] as String?;
+}
+
+/// one page of `GET /v1/rooms`.
+class RoomListing {
+  RoomListing(this.status, this.rooms, this.next);
+  final int status;
+  final List<Map<String, dynamic>> rooms;
+  final String? next;
+
+  Map<String, dynamic>? find(String code) {
+    for (final room in rooms) {
+      if (room['code'] == code) return room;
+    }
+    return null;
+  }
+
+  int indexOf(String code) => rooms.indexWhere((room) => room['code'] == code);
 }
 
 /// the relay under test. black box: http + websocket only.
@@ -96,19 +118,36 @@ class RelayTarget {
 
   Future<HttpResult> postRoom(Object? body) => _request('POST', '/v1/rooms', body);
 
-  Future<CreatedRoom> createRoom({String name = 'host', String? did, int pv = 1, bool approval = false, String? password}) async {
+  Future<HttpResult> getRoomsRaw({Object? limit, String? after}) {
+    final query = <String, String>{};
+    if (limit != null) query['limit'] = '$limit';
+    if (after != null) query['after'] = after;
+    return _request('GET', '/v1/rooms', null, query);
+  }
+
+  Future<RoomListing> getRooms({Object? limit, String? after}) async {
+    final result = await getRoomsRaw(limit: limit, after: after);
+    final rooms = result.body['rooms'];
+    return RoomListing(
+      result.status,
+      rooms is List ? rooms.whereType<Map<String, dynamic>>().toList(growable: false) : const [],
+      result.body['next'] as String?,
+    );
+  }
+
+  Future<CreatedRoom> createRoom({String name = 'host', String? did, int pv = 1, bool approval = false, String? password, bool public = false}) async {
     final result = await postRoom({
       'pv': pv,
       'name': name,
       'did': did ?? 'did-${_random.nextInt(1 << 32)}',
-      'opts': {'approval': approval, 'password': password},
+      'opts': {'approval': approval, 'password': password, 'public': public},
     });
     expect(result.status, 200, reason: 'create failed: ${result.body}');
     return CreatedRoom(result.body['code'] as String, result.body['token'] as String, result.body['max'] as int, result.body['tier'] as String);
   }
 
-  Future<HttpResult> _request(String method, String path, Object? body) async {
-    final req = await _http.openUrl(method, base.replace(path: path));
+  Future<HttpResult> _request(String method, String path, Object? body, [Map<String, String>? query]) async {
+    final req = await _http.openUrl(method, base.replace(path: path, queryParameters: query == null || query.isEmpty ? null : query));
     if (body != null) {
       final bytes = utf8.encode(jsonEncode(body));
       req.headers.contentType = ContentType.json;
@@ -187,6 +226,7 @@ class TestClient {
   final Completer<int?> _closed = Completer<int?>();
 
   int n = 0;
+  int _pings = 0;
   String? token;
   Map<String, dynamic>? welcome;
 
@@ -237,6 +277,15 @@ class TestClient {
     final frame = await expectError(code, fatal: true, timeout: timeout);
     await done.timeout(timeout);
     return frame;
+  }
+
+  /// waits until everything sent before it has been handled, dropping whatever arrives meanwhile.
+  Future<void> roundTrip() async {
+    send({'t': Ctrl.ping, 'c': ++_pings});
+    while (true) {
+      final frame = await nextText();
+      if (frame['t'] == Ctrl.pong) return;
+    }
   }
 
   Future<void> expectSilence([Duration duration = const Duration(milliseconds: 250)]) async {
