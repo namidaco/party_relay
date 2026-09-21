@@ -7,7 +7,7 @@
 
   // Maintainer: bind the custom domain once the zone is on this account.
   // Either add it in the dashboard (Workers > Settings > Domains & Routes), or uncomment:
-  // "routes": [{ "pattern": "party.namida.app", "custom_domain": true }],
+  "routes": [{ "pattern": "party.namida.app", "custom_domain": true }],
 
   "durable_objects": {
     "bindings": [
