@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "namida-party-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "observability": { "enabled": true },
+
+  // Maintainer: bind the custom domain once the zone is on this account.
+  // Either add it in the dashboard (Workers > Settings > Domains & Routes), or uncomment:
+  // "routes": [{ "pattern": "party.namida.app", "custom_domain": true }],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOM", "class_name": "RoomDO" },
+      { "name": "OWNER", "class_name": "OwnerDO" }
+    ]
+  },
+  // SQLite-backed Durable Objects: available on the free plan.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RoomDO", "OwnerDO"] }],
+
+  "vars": {
+    "MEMBERSHIP": "on"
+    // "CREATE_PASSWORD": "",         // self-host: require this password to create a room (only when MEMBERSHIP=off)
+    // "SELFHOST_MAX_MEMBERS": "100", // self-host member cap
+    // test/tuning knobs, all milliseconds:
+    // "HOST_GRACE_MS": "60000", "PENDING_TIMEOUT_MS": "120000", "JOIN_TIMEOUT_MS": "10000",
+    // "IDLE_TIMEOUT_MS": "600000", "ROOM_LIFETIME_MS": "86400000", "RATE_DROP_CLOSE": "200"
+  }
+}
