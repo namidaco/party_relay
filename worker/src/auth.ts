@@ -76,8 +76,8 @@ export async function verifyPatreon(token: string): Promise<AuthResult> {
   return await cachePut('patreon', token, { identity, tier });
 }
 
-export async function verifySupabase(id: string, email: string, did: string): Promise<AuthResult> {
-  const proof = `${id}\u0000${email}`;
+export async function verifySupabase(id: string, email: string, deviceId: string, os: string): Promise<AuthResult> {
+  const proof = `${id}\u0000${email}\u0000${deviceId}\u0000${os}`;
   const cached = await cacheGet('supabase', proof);
   if (cached) return cached;
 
@@ -86,7 +86,7 @@ export async function verifySupabase(id: string, email: string, did: string): Pr
     res = await fetch(SUPABASE_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'check', id, email, deviceId: did, os: 'party' }),
+      body: JSON.stringify({ action: 'check', id, email, deviceId, os }),
     });
   } catch {
     return { error: 'upstream' };

@@ -158,8 +158,10 @@ async function createRoom(req: Request, env: RelayEnv): Promise<Response> {
     } else if (kind === 'supabase') {
       const id = idOf(auth!.id);
       const email = optString(auth!.email, 320);
-      if (id == null || email == null) return json({ error: 'membership_required' }, 401);
-      const res = await verifySupabase(id, email, did);
+      const deviceId = optString(auth!.deviceId, 256);
+      const os = optString(auth!.os, 16);
+      if (id == null || email == null || deviceId == null || os == null) return json({ error: 'membership_required' }, 401);
+      const res = await verifySupabase(id, email, deviceId, os);
       if ('error' in res) return json({ error: res.error }, res.error === 'upstream' ? 502 : 403);
       tier = res.tier;
       identity = res.identity;

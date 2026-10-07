@@ -35,6 +35,8 @@ function patreonError(tok: string): string {
   return tok;
 }
 
+const SUPABASE_DEVICE = { deviceId: 'udid-1', os: 'android' };
+
 function supabase(id: string, body: unknown, status = 200): string {
   fetchMock
     .get('https://avmqoboauxrlzxduobsy.supabase.co')
@@ -43,7 +45,8 @@ function supabase(id: string, body: unknown, status = 200): string {
       path: '/functions/v1/subs',
       body: (raw: string) => {
         try {
-          return (JSON.parse(raw) as { id?: unknown }).id === id;
+          const sent = JSON.parse(raw) as Record<string, unknown>;
+          return sent.id === id && sent.deviceId === SUPABASE_DEVICE.deviceId && sent.os === SUPABASE_DEVICE.os;
         } catch {
           return false;
         }
@@ -143,35 +146,37 @@ describe('membership: patreon', () => {
 describe('membership: supabase', () => {
   it('accepts a live subscription', async () => {
     const id = supabase('s1', { sub: { id: 's1', usd: 7, available_till: null } });
-    const res = await post(body({ kind: 'supabase', id, email: 'a@b.c' }), ON);
+    const res = await post(body({ kind: 'supabase', id, email: 'a@b.c', ...SUPABASE_DEVICE }), ON);
     expect([res.status, res.body.tier, res.body.max]).toEqual([200, 'pookie', 100]);
   });
 
   it('prefers the declared type', async () => {
     const id = supabase('s2', { sub: { id: 's2', usd: 3, type: 'Patootie', available_till: Date.now() + 100000 } });
-    const res = await post(body({ kind: 'supabase', id, email: 'a@b.c' }), ON);
+    const res = await post(body({ kind: 'supabase', id, email: 'a@b.c', ...SUPABASE_DEVICE }), ON);
     expect(res.body.tier).toBe('patootie');
   });
 
   it('rejects an expired subscription and an error answer', async () => {
     const expiredId = supabase('s3', { sub: { id: 's3', usd: 7, available_till: '2001-01-01T00:00:00Z' } });
-    const expired = await post(body({ kind: 'supabase', id: expiredId, email: 'a@b.c' }), ON);
+    const expired = await post(body({ kind: 'supabase', id: expiredId, email: 'a@b.c', ...SUPABASE_DEVICE }), ON);
     expect([expired.status, expired.body.error]).toEqual([403, 'membership_invalid']);
 
     const errId = supabase('s4', { error: 'no such sub' });
-    const err = await post(body({ kind: 'supabase', id: errId, email: 'a@b.c' }), ON);
+    const err = await post(body({ kind: 'supabase', id: errId, email: 'a@b.c', ...SUPABASE_DEVICE }), ON);
     expect([err.status, err.body.error]).toEqual([403, 'membership_invalid']);
   });
 
   it('maps a 5xx to upstream', async () => {
     const id = supabase('s5', { sub: {} }, 503);
-    const res = await post(body({ kind: 'supabase', id, email: 'a@b.c' }), ON);
+    const res = await post(body({ kind: 'supabase', id, email: 'a@b.c', ...SUPABASE_DEVICE }), ON);
     expect([res.status, res.body.error]).toEqual([502, 'upstream']);
   });
 
-  it('needs an id and an email', async () => {
-    expect((await post(body({ kind: 'supabase', id: 's6' }), ON)).status).toBe(401);
-    expect((await post(body({ kind: 'supabase', email: 'a@b.c' }), ON)).status).toBe(401);
+  it('needs an id, an email and the claiming device', async () => {
+    expect((await post(body({ kind: 'supabase', id: 's6', ...SUPABASE_DEVICE }), ON)).status).toBe(401);
+    expect((await post(body({ kind: 'supabase', email: 'a@b.c', ...SUPABASE_DEVICE }), ON)).status).toBe(401);
+    expect((await post(body({ kind: 'supabase', id: 's6', email: 'a@b.c', os: 'android' }), ON)).status).toBe(401);
+    expect((await post(body({ kind: 'supabase', id: 's6', email: 'a@b.c', deviceId: 'udid-1' }), ON)).status).toBe(401);
   });
 });
 

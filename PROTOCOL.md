@@ -36,9 +36,11 @@ Request:
 }
 ```
 
-`auth` variants: `{"kind":"patreon","token"}`, `{"kind":"supabase","id","email"}`, `{"kind":"password","password"}`, or
-`null`.
+`auth` variants: `{"kind":"patreon","token"}`, `{"kind":"supabase","id","email","deviceId","os"}`,
+`{"kind":"password","password"}`, or `null`.
 
+- supabase `deviceId` (1..256 chars) and `os` (`android|windows|linux|macos|ios`) are the ones the coupon was claimed
+  with on that OS, the coupon is rejected for any other device.
 - `pv` party (app protocol) version, integer >= 1. Stored on the room, joins must match exactly.
 - `name` 1..32 chars after trim, control chars stripped. `did` 1..64 chars.
 - `opts.password` null or 1..64 chars.
