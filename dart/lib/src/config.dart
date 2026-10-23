@@ -6,6 +6,7 @@ class PartyRelayConfig {
     this.joinTimeout = const Duration(seconds: 10),
     this.idleTimeout = const Duration(minutes: 10),
     this.roomLifetime = const Duration(hours: 24),
+    this.pingInterval = const Duration(seconds: 30),
     this.maxMembers = 100,
     this.maxRoomsTotal,
     this.createPassword,
@@ -53,6 +54,10 @@ class PartyRelayConfig {
 
   /// room is closed with `expired` this long after creation.
   final Duration roomLifetime;
+
+  /// every socket is pinged this often and dropped when the previous ping got no pong, so a peer that vanished
+  /// without closing is noticed.
+  final Duration pingInterval;
 
   final int maxMembers;
 
@@ -108,7 +113,7 @@ class PartyRelayConfig {
   final int maxRetainedMembers;
   final int maxSuccessors;
 
-  /// read the client ip from `X-Forwarded-For` / `CF-Connecting-IP` instead of the socket.
+  /// read the client ip from the last `X-Forwarded-For` entry, else `CF-Connecting-IP`, instead of the socket.
   final bool trustProxyHeaders;
 
   final Duration pruneInterval;
@@ -159,6 +164,7 @@ class PartyRelayConfig {
     Duration? joinTimeout,
     Duration? idleTimeout,
     Duration? roomLifetime,
+    Duration? pingInterval,
     int? maxMembers,
     int? maxRoomsTotal,
     String? createPassword,
@@ -197,6 +203,7 @@ class PartyRelayConfig {
       joinTimeout: joinTimeout ?? this.joinTimeout,
       idleTimeout: idleTimeout ?? this.idleTimeout,
       roomLifetime: roomLifetime ?? this.roomLifetime,
+      pingInterval: pingInterval ?? this.pingInterval,
       maxMembers: maxMembers ?? this.maxMembers,
       maxRoomsTotal: maxRoomsTotal ?? this.maxRoomsTotal,
       createPassword: createPassword ?? this.createPassword,

@@ -9,10 +9,15 @@ const inDO = runInDurableObject as unknown as (
   cb: (instance: any, state: DurableObjectState) => unknown,
 ) => Promise<void>;
 
+/** Runs `cb` inside the room's durable object. */
+export async function inRoom(code: string, cb: (instance: any) => unknown): Promise<void> {
+  const ns = ENV.ROOM as unknown as DurableObjectNamespace;
+  await inDO(ns.get(ns.idFromName(code)), cb);
+}
+
 /** Drops everything the room keeps in memory, the way an eviction would. */
 export async function evictRoom(code: string): Promise<void> {
-  const ns = ENV.ROOM as unknown as DurableObjectNamespace;
-  await inDO(ns.get(ns.idFromName(code)), (instance: any) => {
+  await inRoom(code, (instance: any) => {
     instance.st = null;
     instance.members = null;
     instance.idx = null;

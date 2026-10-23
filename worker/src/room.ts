@@ -165,6 +165,7 @@ export class RoomDO extends DurableObject<RelayEnv> {
   // ---------------------------------------------------------------- messages
 
   private async onMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
+    if (this.gone.has(ws)) return;
     const st = this.st ?? (await this.load());
     if (!st) return this.fatal(ws, 'not_found');
     const att = this.attOf(ws);
@@ -175,15 +176,14 @@ export class RoomDO extends DurableObject<RelayEnv> {
     if (st.dirAt != null && Date.now() - st.dirAt >= this.tm.refresh) await this.pushDir(st, false);
 
     if (typeof message === 'string') {
-      if (textTooLarge(message)) {
-        if (!joined) return this.fatal(ws, 'bad_request');
-        return this.send(ws, { t: 'error', code: 'too_large' });
-      }
+      const tooLarge = textTooLarge(message);
+      if (tooLarge && !joined) return this.fatal(ws, 'bad_request');
       const textVerdict = this.take(ws, isHost);
       if (textVerdict !== TAKE_OK) {
         if (textVerdict === TAKE_CLOSE) return await this.drop(ws, 'lost', 'rate_limited');
         return;
       }
+      if (tooLarge) return this.send(ws, { t: 'error', code: 'too_large' });
       const m = parseControl(message);
       if (!m) {
         if (!joined && att.p == null) return this.fatal(ws, 'bad_request');
@@ -198,13 +198,13 @@ export class RoomDO extends DurableObject<RelayEnv> {
     }
 
     if (!joined) return this.fatal(ws, 'bad_request');
-    if (message.byteLength > (isHost ? BIN_MAX_HOST : BIN_MAX_GUEST)) {
-      return this.send(ws, { t: 'error', code: 'too_large' });
-    }
     const verdict = this.take(ws, isHost);
     if (verdict !== TAKE_OK) {
       if (verdict === TAKE_CLOSE) return await this.drop(ws, 'lost', 'rate_limited');
       return;
+    }
+    if (message.byteLength > (isHost ? BIN_MAX_HOST : BIN_MAX_GUEST)) {
+      return this.send(ws, { t: 'error', code: 'too_large' });
     }
     this.onData(ws, att.n!, st, isHost, message);
   }
@@ -247,25 +247,28 @@ export class RoomDO extends DurableObject<RelayEnv> {
     if (!f) return this.fatal(ws, 'bad_request');
     if (f.pv !== st.pv) return this.fatal(ws, 'version_mismatch', { pv: st.pv });
 
-    // a ban revokes the member token, so a live token always belongs to a member that was not banned
+    // a ban revokes the member token, and so does tightening the room for everyone absent,
+    // so a live token belongs to a member admitted under the current rules
     let n: number | null = null;
     if (f.token != null) n = await this.memberByToken(f.token);
 
-    if (n == null) {
+    if (n != null) {
+      if (!this.index().has(n) && n !== st.hostN && this.takenSlots(st) >= st.maxMembers) return this.fatal(ws, 'full');
+    } else {
       if (this.banned(st, f.did, att.ip)) return this.fatal(ws, 'banned');
       if (st.locked) return this.fatal(ws, 'locked');
       if (st.pwHash != null) {
         const given = f.password != null ? await sha256hex(f.password) : '';
         if (!ctEq(given, st.pwHash)) return this.fatal(ws, 'bad_password');
       }
-      if (this.index().size >= st.maxMembers) return this.fatal(ws, 'full');
+      if (this.takenSlots(st) >= st.maxMembers) return this.fatal(ws, 'full');
       if (st.approval) {
         const host = st.hostN != null ? this.index().get(st.hostN) : undefined;
         if (!host) return this.fatal(ws, 'host_offline');
         if (this.pendingCount() >= MAX_PENDING) return this.fatal(ws, 'rate_limited');
         const r = reqId();
         this.setAtt(ws, { ip: att.ip, name: f.name, did: f.did, p: r, pd: Date.now() + this.tm.pending });
-        this.send(host, { t: 'joinreq', r, name: f.name, did: f.did });
+        this.send(host, this.joinreqFrame(r, f.name, f.did));
         this.send(ws, { t: 'pending' });
         return await this.arm();
       }
@@ -301,7 +304,10 @@ export class RoomDO extends DurableObject<RelayEnv> {
     const wasHostOnline = prevHostN != null && this.index().has(prevHostN);
     if (replacing) await this.drop(prev, 'replaced');
 
-    if (st.hostN == null) st.hostN = n;
+    if (st.hostN == null) {
+      st.hostN = n;
+      st.successors = [];
+    }
     const isHost = st.hostN === n;
     if (isHost) st.hostGraceUntil = null;
     st.idleSince = null;
@@ -326,7 +332,7 @@ export class RoomDO extends DurableObject<RelayEnv> {
       opts: this.opts(st),
       members: list,
     });
-    if (isHost && st.bans.length > 0) this.sendBans(ws, st);
+    if (isHost) this.sendHostState(ws, st);
     // replacing a live socket is not a join, the member never left
     if (!replacing) this.broadcast({ t: 'joined', n, name }, n);
     if (isHost && (st.hostN !== prevHostN || !wasHostOnline)) this.broadcast({ t: 'host', n, online: true }, n);
@@ -382,25 +388,40 @@ export class RoomDO extends DurableObject<RelayEnv> {
     const rec = members.get(target);
     const sock = this.index().get(target);
     if (!rec && !sock) return this.send(ws, { t: 'error', code: 'bad_request' });
-    const ban = m.ban === true;
+    if (m.ban !== true) return await this.expel(target, 'kick');
 
-    if (ban) {
-      const entry: Ban = {
-        id: banId(),
-        name: rec?.name ?? (sock ? (this.attOf(sock)?.name ?? '') : ''),
-        did: rec?.did ?? '',
-        ip: rec?.ip ?? '',
-      };
-      st.bans.push(entry);
-      while (st.bans.length > MAX_BANS) st.bans.shift();
-    }
-    if (rec) {
-      members.delete(target);
-      await this.ctx.storage.delete(`m:${target}`);
-    }
+    const entry: Ban = {
+      id: banId(),
+      name: rec?.name ?? (sock ? (this.attOf(sock)?.name ?? '') : ''),
+      did: rec?.did ?? '',
+      ip: rec?.ip ?? '',
+    };
+    st.bans.push(entry);
+    while (st.bans.length > MAX_BANS) st.bans.shift();
     await this.ctx.storage.put('st', st);
-    if (sock) await this.drop(sock, ban ? 'ban' : 'kick', ban ? 'banned' : 'kicked');
-    if (ban) this.sendBans(ws, st);
+    await this.expel(target, 'ban');
+    await this.expelDevice(st, entry.did);
+    this.sendBans(ws, st);
+  }
+
+  /** Revokes the member token, a connected member gets the matching fatal error and everyone else `left`. */
+  private async expel(n: number, reason: 'kick' | 'ban'): Promise<void> {
+    const members = await this.ensureMembers();
+    if (members.delete(n)) await this.ctx.storage.delete(`m:${n}`);
+    const sock = this.index().get(n);
+    if (sock) await this.drop(sock, reason, reason === 'ban' ? 'banned' : 'kicked');
+  }
+
+  /** A ban covers every member and pending join of the device, an ip alone may be a shared nat. */
+  private async expelDevice(st: RoomState, did: string): Promise<void> {
+    for (const rec of (await this.ensureMembers()).values()) {
+      if (rec.did === did && rec.n !== st.hostN) await this.expel(rec.n, 'ban');
+    }
+    for (const sock of this.ctx.getWebSockets()) {
+      if (this.gone.has(sock)) continue;
+      const att = this.attOf(sock);
+      if (att?.p != null && att.did === did) await this.fatal(sock, 'banned');
+    }
   }
 
   private async onUnban(ws: WebSocket, st: RoomState, m: Record<string, unknown>): Promise<void> {
@@ -429,18 +450,21 @@ export class RoomDO extends DurableObject<RelayEnv> {
     // resolved by the host, no `joinreqgone` for it
     this.setAtt(target, { ip: att.ip, name: att.name, did: att.did });
     if (m.ok !== true) return await this.drop(target, 'lost', 'rejected');
-    if (this.index().size >= st.maxMembers) return await this.drop(target, 'lost', 'full');
+    if (this.takenSlots(st) >= st.maxMembers) return await this.drop(target, 'lost', 'full');
     await this.admit(target, st, null, att.name ?? '', att.did ?? '', att.ip, null);
   }
 
   private async onTransfer(ws: WebSocket, st: RoomState, m: Record<string, unknown>): Promise<void> {
     const target = m.n;
     if (!isNum(target)) return this.send(ws, { t: 'error', code: 'bad_request' });
-    if (!this.index().has(target)) return this.send(ws, { t: 'error', code: 'bad_request' });
+    const sock = this.index().get(target);
+    if (!sock) return this.send(ws, { t: 'error', code: 'bad_request' });
     st.hostN = target;
+    st.successors = [];
     st.hostGraceUntil = null;
     await this.ctx.storage.put('st', st);
     this.broadcast({ t: 'host', n: target, online: true });
+    this.sendHostState(sock, st);
     await this.arm();
   }
 
@@ -469,10 +493,13 @@ export class RoomDO extends DurableObject<RelayEnv> {
       if (p === undefined) return this.send(ws, { t: 'error', code: 'bad_request' });
       pwHash = p == null ? null : await sha256hex(p);
     }
+    const tightens =
+      (m.approval === true && !st.approval) || (m.locked === true && !st.locked) || (pwHash != null && pwHash !== st.pwHash);
     if ('approval' in m) st.approval = m.approval as boolean;
     if ('locked' in m) st.locked = m.locked as boolean;
     if ('public' in m) st.pub = m.public as boolean;
     if (pwHash !== undefined) st.pwHash = pwHash;
+    if (tightens) await this.revokeAbsent();
     await this.syncDir(st, false);
     await this.ctx.storage.put('st', st);
     this.broadcast({ t: 'opts', ...this.opts(st) });
@@ -511,9 +538,13 @@ export class RoomDO extends DurableObject<RelayEnv> {
         } else {
           this.broadcast({ t: 'left', n: att.n, r: reason });
           if (st && st.hostN === att.n) {
-            st.hostGraceUntil = Date.now() + this.tm.grace;
-            dirty = true;
-            this.broadcast({ t: 'host', n: att.n, online: false });
+            if (reason === 'leave') {
+              await this.promote(st);
+            } else {
+              st.hostGraceUntil = Date.now() + this.tm.grace;
+              dirty = true;
+              this.broadcast({ t: 'host', n: att.n, online: false });
+            }
           }
           if (st && this.index().size === 0) {
             st.idleSince = Date.now();
@@ -524,6 +555,12 @@ export class RoomDO extends DurableObject<RelayEnv> {
       }
     }
     this.atts.delete(ws);
+    // the socket stays listed until its close completes, an index rebuilt after an eviction must skip it
+    try {
+      ws.serializeAttachment(null);
+    } catch {
+      /* already gone */
+    }
 
     if (fatalCode) this.send(ws, { t: 'error', code: fatalCode, fatal: true, ...extra });
     try {
@@ -550,8 +587,31 @@ export class RoomDO extends DurableObject<RelayEnv> {
       for (const n of idx.keys()) if (next == null || n < next) next = n;
     }
     st.hostN = next;
+    st.successors = [];
     await this.ctx.storage.put('st', st);
-    if (next != null) this.broadcast({ t: 'host', n: next, online: true });
+    if (next == null) return;
+    this.broadcast({ t: 'host', n: next, online: true });
+    this.sendHostState(idx.get(next)!, st);
+  }
+
+  /** Members away when the room got stricter must pass its new rules to come back. */
+  private async revokeAbsent(): Promise<void> {
+    const members = await this.ensureMembers();
+    const idx = this.index();
+    const keys: string[] = [];
+    for (const n of members.keys()) {
+      if (idx.has(n)) continue;
+      members.delete(n);
+      keys.push(`m:${n}`);
+    }
+    // storage deletes at most 128 keys per call
+    for (let i = 0; i < keys.length; i += 128) await this.ctx.storage.delete(keys.slice(i, i + 128));
+  }
+
+  /** An absent host keeps its slot, so it can always come back. */
+  private takenSlots(st: RoomState): number {
+    const idx = this.index();
+    return st.hostN != null && !idx.has(st.hostN) ? idx.size + 1 : idx.size;
   }
 
   private async closeRoom(reason: 'host' | 'idle' | 'expired'): Promise<void> {
@@ -801,6 +861,20 @@ export class RoomDO extends DurableObject<RelayEnv> {
 
   private sendBans(ws: WebSocket, st: RoomState): void {
     this.send(ws, { t: 'bans', list: st.bans.map((b) => ({ id: b.id, name: b.name })) });
+  }
+
+  /** What only the host tracks, sent to whoever becomes it. */
+  private sendHostState(ws: WebSocket, st: RoomState): void {
+    if (st.bans.length > 0) this.sendBans(ws, st);
+    for (const sock of this.ctx.getWebSockets()) {
+      if (this.gone.has(sock)) continue;
+      const att = this.attOf(sock);
+      if (att?.p != null) this.send(ws, this.joinreqFrame(att.p, att.name ?? '', att.did ?? ''));
+    }
+  }
+
+  private joinreqFrame(r: string, name: string, did: string): object {
+    return { t: 'joinreq', r, name, did };
   }
 
   private fatal(ws: WebSocket, code: string, extra?: object): Promise<void> {

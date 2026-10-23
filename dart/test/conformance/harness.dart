@@ -272,6 +272,14 @@ class TestClient {
     return frame;
   }
 
+  /// skips frames until one of [type] that [matches] arrives.
+  Future<Map<String, dynamic>> waitFor(String type, [bool Function(Map<String, dynamic> frame)? matches]) async {
+    while (true) {
+      final frame = await nextText();
+      if (frame['t'] == type && (matches == null || matches(frame))) return frame;
+    }
+  }
+
   /// fatal error + close.
   Future<Map<String, dynamic>> expectFatal(String code, [Duration timeout = kFrameTimeout]) async {
     final frame = await expectError(code, fatal: true, timeout: timeout);

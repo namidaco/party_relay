@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evictRoom as evict, header, join, makeRoom, parseHeader, wait } from './helpers';
+import { evictRoom as evict, header, inRoom, join, makeRoom, parseHeader, wait } from './helpers';
 
 describe('hibernation safety', () => {
   it('keeps routing, membership and host state across an eviction', async () => {
@@ -51,6 +51,27 @@ describe('hibernation safety', () => {
       { n: 1, name: 'host' },
       { n: 2, name: 'g' },
     ]);
+  });
+
+  it('ignores frames of a dropped socket, also after an eviction', async () => {
+    const created = await makeRoom();
+    const host = await join(created.code, { token: created.token, name: 'host' });
+    await join(created.code, { name: 'a', did: 'a' });
+    await host.sock.next();
+
+    await inRoom(created.code, async (instance: any) => {
+      const ws = instance.index().get(2);
+      await instance.drop(ws, 'kick', 'kicked');
+      await instance.webSocketMessage(ws, header(0, 0, [1]).buffer);
+      // what an eviction forgets, while the closing socket may still be listed
+      instance.idx = null;
+      instance.atts = new WeakMap();
+      instance.gone = new WeakSet();
+      await instance.webSocketMessage(ws, header(0, 0, [2]).buffer);
+      expect(instance.index().has(2)).toBe(false);
+    });
+    await host.sock.quiet();
+    expect(host.sock.bin).toEqual([]);
   });
 
   it('still promotes through the alarm after an eviction', async () => {

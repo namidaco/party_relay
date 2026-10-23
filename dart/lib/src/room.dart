@@ -79,6 +79,9 @@ class RelayRoom implements DirectoryRoom {
 
   int get connectedCount => _connected.length;
 
+  /// an absent host keeps its slot, so it can always come back.
+  int get _takenSlots => hostN != null && !_hostOnline ? _connected.length + 1 : _connected.length;
+
   void _connect(RelayMember member, RelaySocket s) {
     if (member.sock == null) _connected.add(member);
     member.sock = s;
@@ -104,15 +107,18 @@ class RelayRoom implements DirectoryRoom {
     if (name == null) return s.fatal(RelayErrors.badRequest);
     if (joinPv != pv) return s.fatal(RelayErrors.versionMismatch, {'pv': pv});
 
-    // -- a valid token resumes, bans/locked/password/full/approval only gate new members
+    // -- tightening the room revokes every absent token, so a live one was admitted under the current rules
     final resumed = token is String ? _memberByToken(token) : null;
-    if (resumed != null) return _attach(s, resumed, name);
+    if (resumed != null) {
+      if (!resumed.connected && resumed.n != hostN && _takenSlots >= max) return s.fatal(RelayErrors.full);
+      return _attach(s, resumed, name);
+    }
 
     if (_isBanned(did, s.ip)) return s.fatal(RelayErrors.banned);
     if (locked) return s.fatal(RelayErrors.locked);
     final roomPassword = this.password;
     if (roomPassword != null && (password is! String || !constantTimeEquals(roomPassword, password))) return s.fatal(RelayErrors.badPassword);
-    if (connectedCount >= max) return s.fatal(RelayErrors.full);
+    if (_takenSlots >= max) return s.fatal(RelayErrors.full);
 
     if (approval) {
       final host = _hostSock;
@@ -123,7 +129,7 @@ class RelayRoom implements DirectoryRoom {
       _pending[request.id] = request;
       s.pending = request;
       s.sendText(jsonEncode({'t': Ctrl.pending}));
-      host.sendText(jsonEncode({'t': Ctrl.joinreq, 'r': request.id, 'name': name, 'did': did}));
+      host.sendText(_joinreqJson(request));
       return;
     }
     _admit(s, name, did);
@@ -140,8 +146,8 @@ class RelayRoom implements DirectoryRoom {
   void _admit(RelaySocket s, String name, String did) {
     final member = RelayMember(n: ++_lastN, name: name, did: did, ip: s.ip, token: newToken());
     _members[member.n] = member;
-    _trimRetained();
     _attach(s, member, name);
+    _trimRetained();
   }
 
   void _attach(RelaySocket s, RelayMember member, String name) {
@@ -175,7 +181,15 @@ class RelayRoom implements DirectoryRoom {
     if (previous == null) _broadcast(_joinedJson(member), skip: member.n);
     // -- the joiner already learned the host from its welcome
     if (isHost && hostWasOffline) _broadcast(_hostJson(), skip: member.n);
-    if (isHost && _bans.isNotEmpty) s.sendText(_bansJson());
+    if (isHost) _sendHostState(s);
+  }
+
+  /// what only the host tracks, sent to whoever becomes it.
+  void _sendHostState(RelaySocket s) {
+    if (_bans.isNotEmpty) s.sendText(_bansJson());
+    for (final request in _pending.values) {
+      s.sendText(_joinreqJson(request));
+    }
   }
 
   void handleControl(RelaySocket s, Map<String, Object?> msg) {
@@ -230,10 +244,7 @@ class RelayRoom implements DirectoryRoom {
       _disconnect(me);
       s.member = null;
       _broadcast(_leftJson(me.n, LeftReason.leave), skip: me.n);
-      if (me.n == hostN) {
-        _broadcast(_hostJson());
-        _startGrace();
-      }
+      if (me.n == hostN) _promote();
       _armIdle();
     }
     s.closeNow();
@@ -245,17 +256,39 @@ class RelayRoom implements DirectoryRoom {
     if (n is! int || (ban != null && ban is! bool)) return s.sendError(RelayErrors.badRequest);
     final target = _members[n];
     if (target == null || n == hostN) return s.sendError(RelayErrors.badRequest);
-    final banned = ban == true;
-    _members.remove(n);
-    final targetSock = target.sock;
-    _disconnect(target);
-    target.token = '';
-    targetSock?.member = null;
-    if (banned) _addBan(target);
-    _broadcast(_leftJson(n, banned ? LeftReason.ban : LeftReason.kick));
-    targetSock?.fatal(banned ? RelayErrors.banned : RelayErrors.kicked);
-    if (banned) s.sendText(_bansJson());
+    if (ban == true) {
+      _addBan(target);
+      _expel(target, LeftReason.ban, RelayErrors.banned);
+      _expelDevice(target.did);
+      s.sendText(_bansJson());
+    } else {
+      _expel(target, LeftReason.kick, RelayErrors.kicked);
+    }
     _armIdle();
+  }
+
+  /// revokes the member token, a connected member gets [code] and everyone else `left`.
+  void _expel(RelayMember member, String reason, String code) {
+    _members.remove(member.n);
+    member.token = '';
+    final sock = member.sock;
+    if (sock == null) return;
+    _disconnect(member);
+    sock.member = null;
+    _broadcast(_leftJson(member.n, reason));
+    sock.fatal(code);
+  }
+
+  /// a ban covers every member and pending join of the device, an ip alone may be a shared nat.
+  void _expelDevice(String did) {
+    final members = _members.values.where((m) => m.did == did && m.n != hostN).toList(growable: false);
+    for (final m in members) {
+      _expel(m, LeftReason.ban, RelayErrors.banned);
+    }
+    final requests = _pending.values.where((r) => r.did == did).toList(growable: false);
+    for (final request in requests) {
+      _dropPending(request, RelayErrors.banned);
+    }
   }
 
   void _unban(RelaySocket s, Map<String, Object?> msg) {
@@ -276,7 +309,7 @@ class RelayRoom implements DirectoryRoom {
     sock.pending = null;
     if (sock.closed) return;
     if (!ok) return sock.fatal(RelayErrors.rejected);
-    if (connectedCount >= max) return sock.fatal(RelayErrors.full);
+    if (_takenSlots >= max) return sock.fatal(RelayErrors.full);
     _admit(sock, request.name, request.did);
   }
 
@@ -293,6 +326,7 @@ class RelayRoom implements DirectoryRoom {
     _graceTimer?.cancel();
     _graceTimer = null;
     _broadcast(_hostJson());
+    _sendHostState(target.sock!);
   }
 
   void _successors(RelaySocket s, Map<String, Object?> msg) {
@@ -321,11 +355,18 @@ class RelayRoom implements DirectoryRoom {
     if (hasPublic && newPublic is! bool) return s.sendError(RelayErrors.badRequest);
     final badPassword = newPassword is! String || newPassword.isEmpty || newPassword.length > kMaxPasswordLength;
     if (hasPassword && newPassword != null && badPassword) return s.sendError(RelayErrors.badRequest);
+    final tightens = (newApproval == true && !approval) || (newLocked == true && !locked) || (newPassword != null && newPassword != password);
     if (hasApproval) approval = newApproval! as bool;
     if (hasLocked) locked = newLocked! as bool;
     if (hasPassword) password = newPassword as String?;
     if (hasPublic) public = newPublic! as bool;
+    if (tightens) _revokeAbsent();
     _broadcast(_optsJson());
+  }
+
+  /// members away when the room got stricter must pass its new rules to come back.
+  void _revokeAbsent() {
+    _members.removeWhere((_, m) => !m.connected);
   }
 
   /// nothing is broadcast, the summary only feeds the directory.
@@ -463,7 +504,7 @@ class RelayRoom implements DirectoryRoom {
     if (next == null) return;
     next.sock!.bucket.reconfigure(config.hostBurst, config.hostRefillPerSecond);
     _broadcast(_hostJson());
-    if (_bans.isNotEmpty) next.sock!.sendText(_bansJson());
+    _sendHostState(next.sock!);
   }
 
   void _armIdle() {
@@ -498,26 +539,6 @@ class RelayRoom implements DirectoryRoom {
     _members.clear();
     _connected.clear();
     onGone(this);
-  }
-
-  /// drops the socket of every member without notifying, used on server shutdown.
-  void dispose() {
-    _gone = true;
-    _entry = null;
-    _graceTimer?.cancel();
-    _idleTimer?.cancel();
-    _lifeTimer?.cancel();
-    for (final request in _pending.values) {
-      request.timer?.cancel();
-      request.sock.closeNow();
-    }
-    for (final m in _connected) {
-      m.sock?.closeNow();
-      m.sock = null;
-    }
-    _pending.clear();
-    _members.clear();
-    _connected.clear();
   }
 
   bool _isBanned(String did, String ip) {
@@ -584,6 +605,8 @@ class RelayRoom implements DirectoryRoom {
   String _leftJson(int n, String reason) => jsonEncode({'t': Ctrl.left, 'n': n, 'r': reason});
 
   String _hostJson() => jsonEncode({'t': Ctrl.host, 'n': hostN, 'online': _hostOnline});
+
+  String _joinreqJson(PendingJoin request) => jsonEncode({'t': Ctrl.joinreq, 'r': request.id, 'name': request.name, 'did': request.did});
 
   String _joinreqGoneJson(String id) => jsonEncode({'t': Ctrl.joinreqgone, 'r': id});
 

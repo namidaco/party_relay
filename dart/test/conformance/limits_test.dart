@@ -55,6 +55,17 @@ void main() {
     await host.expectSilence();
   });
 
+  /// the socket closes, and a fatal `rate_limited` came before the close.
+  Future<void> expectRateClosed(TestClient client) async {
+    await client.done.timeout(const Duration(seconds: 20));
+    var fatal = false;
+    while (client.queued > 0) {
+      final frame = await client.nextText();
+      if (frame['t'] == Ctrl.error && frame['code'] == RelayErrors.rateLimited && frame['fatal'] == true) fatal = true;
+    }
+    expect(fatal, isTrue, reason: 'expected a fatal rate_limited before the close');
+  }
+
   test(
     'sustained abuse gets a warning then a fatal close',
     () async {
@@ -63,14 +74,26 @@ void main() {
         guest.sendData(DataRoute.host, 0, const [7]);
       }
       await guest.expectError(RelayErrors.rateLimited, fatal: false);
-      await guest.done.timeout(const Duration(seconds: 20));
+      await expectRateClosed(guest);
+      expect(host.isOpen, isTrue);
+    },
+    timeout: const Timeout(Duration(seconds: 60)),
+  );
 
-      var fatal = false;
-      while (guest.queued > 0) {
-        final frame = await guest.nextText();
-        if (frame['t'] == Ctrl.error && frame['code'] == RelayErrors.rateLimited && frame['fatal'] == true) fatal = true;
+  test(
+    'too large frames count against the rate limit',
+    () async {
+      final (host, guest) = await pair();
+      final text = jsonEncode({'t': Ctrl.ping, 'c': 1, 'pad': 'x' * kTextFrameMax});
+      final data = encodeDataFrame(DataRoute.host, 0, pattern(kGuestFrameMax));
+      for (var i = 0; i < kRateDropClose + 120; i++) {
+        if (i.isEven) {
+          guest.sendText(text);
+        } else {
+          guest.sendRaw(data);
+        }
       }
-      expect(fatal, isTrue, reason: 'expected a fatal rate_limited before the close');
+      await expectRateClosed(guest);
       expect(host.isOpen, isTrue);
     },
     timeout: const Timeout(Duration(seconds: 60)),

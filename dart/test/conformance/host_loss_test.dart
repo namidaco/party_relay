@@ -4,6 +4,7 @@ import 'package:test/test.dart';
 import 'harness.dart';
 
 const Duration kAfterGrace = Duration(milliseconds: kHostGraceMs * 3);
+const Duration kPromptly = Duration(milliseconds: kHostGraceMs ~/ 2);
 
 void main() {
   late RelayTarget relay;
@@ -84,6 +85,58 @@ void main() {
     expect(first.welcome!['hostOnline'], true);
     first.send({'t': Ctrl.opts, 'approval': true});
     expect((await first.expectFrame(Ctrl.opts))['approval'], true);
+  });
+
+  test('a host that leaves is replaced at once', () async {
+    final (_, host, a, b) = await party();
+    final preferred = <int>[b.n];
+    host.send({'t': Ctrl.successors, 'ns': preferred});
+    host.send({'t': Ctrl.leave});
+    for (final client in [a, b]) {
+      final left = await client.expectFrame(Ctrl.left);
+      expect(left['n'], 1);
+      expect(left['r'], LeftReason.leave);
+      final frame = await client.expectFrame(Ctrl.host, kPromptly);
+      expect(frame['n'], b.n);
+      expect(frame['online'], true);
+    }
+    b.send({'t': Ctrl.opts, 'locked': true});
+    expect((await b.expectFrame(Ctrl.opts))['locked'], true);
+  });
+
+  test('a lone host that leaves makes the room hostless at once', () async {
+    final room = await relay.createRoom();
+    final host = await relay.join(room.code, name: 'host', token: room.token);
+    host.send({'t': Ctrl.leave});
+    await host.done.timeout(kPromptly);
+    final first = await relay.join(room.code, name: 'first', did: 'did-first');
+    expect(first.welcome!['host'], first.n);
+    expect(first.welcome!['hostOnline'], true);
+  });
+
+  test('successors are dropped by a transfer', () async {
+    final (_, host, a, b) = await party();
+    final preferred = <int>[b.n];
+    host.send({'t': Ctrl.successors, 'ns': preferred});
+    host.send({'t': Ctrl.transfer, 'n': a.n});
+    expect((await b.expectFrame(Ctrl.host))['n'], a.n);
+    await a.close();
+    await expectHostLost(b, a.n);
+    expect((await b.expectFrame(Ctrl.host, kAfterGrace))['n'], 1);
+  });
+
+  test('successors are dropped by a promotion', () async {
+    final (room, host, a, b) = await party();
+    final c = await relay.join(room.code, name: 'c', did: 'did-c');
+    await a.expectFrame(Ctrl.joined);
+    final preferred = <int>[b.n, c.n];
+    host.send({'t': Ctrl.successors, 'ns': preferred});
+    await host.close();
+    await expectHostLost(a, 1);
+    expect((await a.expectFrame(Ctrl.host, kAfterGrace))['n'], b.n);
+    await b.close();
+    await expectHostLost(a, b.n);
+    expect((await a.expectFrame(Ctrl.host, kAfterGrace))['n'], a.n);
   });
 
   test('the host can resume within the grace window', () async {

@@ -87,6 +87,49 @@ void main() {
     expect(allowed.n, greaterThan(b.n));
   });
 
+  test('a ban covers every member and pending join of the device', () async {
+    final room = await relay.createRoom();
+    final host = await relay.join(room.code, name: 'host', token: room.token);
+    final a = await relay.join(room.code, name: 'a', did: 'did-a');
+    final twin = await relay.join(room.code, name: 'twin', did: 'did-a');
+    final away = await relay.join(room.code, name: 'away', did: 'did-a');
+    for (var i = 0; i < 3; i++) {
+      await host.expectFrame(Ctrl.joined);
+    }
+    host.send({'t': Ctrl.opts, 'approval': true});
+    await host.expectFrame(Ctrl.opts);
+    await away.close();
+    await host.waitFor(Ctrl.left, (f) => f['n'] == away.n);
+
+    final sameDevice = await relay.connect(room.code);
+    expect((await sameDevice.joinRaw(name: 'again', did: 'did-a'))['t'], Ctrl.pending);
+    final sameDeviceRequest = await host.expectFrame(Ctrl.joinreq);
+    final sameIp = await relay.connect(room.code);
+    expect((await sameIp.joinRaw(name: 'neighbour', did: 'did-neighbour'))['t'], Ctrl.pending);
+    final sameIpRequest = await host.expectFrame(Ctrl.joinreq);
+
+    host.send({'t': Ctrl.kick, 'n': a.n, 'ban': true});
+    for (final client in [a, twin]) {
+      final error = await client.waitFor(Ctrl.error);
+      expect(error['code'], RelayErrors.banned);
+      expect(error['fatal'], true);
+      await client.done.timeout(kFrameTimeout);
+    }
+    await sameDevice.expectFatal(RelayErrors.banned);
+    expect(await host.expectFrame(Ctrl.left), {'t': Ctrl.left, 'n': a.n, 'r': LeftReason.ban});
+    expect(await host.expectFrame(Ctrl.left), {'t': Ctrl.left, 'n': twin.n, 'r': LeftReason.ban});
+    expect((await host.expectFrame(Ctrl.joinreqgone))['r'], sameDeviceRequest['r']);
+    expect((await host.expectFrame(Ctrl.bans))['list'], hasLength(1));
+
+    for (final token in [twin.token, away.token]) {
+      final back = await relay.connect(room.code);
+      back.send({'t': Ctrl.join, 'pv': 1, 'name': 'back', 'did': 'did-a', 'token': token});
+      await back.expectFatal(RelayErrors.banned);
+    }
+    host.send({'t': Ctrl.approve, 'r': sameIpRequest['r'], 'ok': true});
+    expect((await sameIp.expectFrame(Ctrl.welcome))['n'], greaterThan(away.n));
+  });
+
   test('transfer moves host rights', () async {
     final (room, host, a, b) = await party();
     host.send({'t': Ctrl.transfer, 'n': a.n});

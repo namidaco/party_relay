@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:namida_party_relay/namida_party_relay.dart';
 import 'package:test/test.dart';
 
@@ -79,6 +82,30 @@ void main() {
     final result = await relay.postRoom({'pv': 1, 'name': 'host', 'did': 'd'});
     expect(result.status, 429);
     expect(result.error, RelayErrors.rateLimited);
+  });
+
+  test('a trusted proxy ip is the last forwarded entry, else cloudflare', () async {
+    final relay = await RelayTarget.start(config: const PartyRelayConfig(createLimit: 1, trustProxyHeaders: true), local: true);
+    addTearDown(relay.dispose);
+    final http = HttpClient();
+    addTearDown(() => http.close(force: true));
+    Future<int> createFrom(Map<String, String> headers) async {
+      final req = await http.postUrl(relay.base.replace(path: '/v1/rooms'));
+      for (final header in headers.entries) {
+        req.headers.set(header.key, header.value);
+      }
+      req.write(jsonEncode({'pv': 1, 'name': 'host', 'did': 'd'}));
+      final res = await req.close();
+      await res.drain<void>();
+      return res.statusCode;
+    }
+
+    expect(await createFrom({'x-forwarded-for': '1.1.1.1, 10.0.0.1'}), 200);
+    expect(await createFrom({'x-forwarded-for': '2.2.2.2, 10.0.0.1'}), 429, reason: 'the client written entry must not pick the ip');
+    expect(await createFrom({'cf-connecting-ip': '1.1.1.1', 'x-forwarded-for': '10.0.0.3'}), 200, reason: 'a client written cloudflare header must not pick the ip');
+    expect(await createFrom({'x-forwarded-for': '10.0.0.3'}), 429);
+    expect(await createFrom({'cf-connecting-ip': '10.0.0.4'}), 200);
+    expect(await createFrom({'cf-connecting-ip': '10.0.0.4'}), 429);
   });
 
   test('join is rate limited per ip', () async {

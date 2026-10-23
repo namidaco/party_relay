@@ -67,9 +67,10 @@ The image is `scratch` plus the dart runtime deps and the compiled exe.
 
 The relay speaks plain http/ws unless a `SecurityContext` is passed to `PartyRelayServer.start`. For a public deploy
 put it behind a reverse proxy (caddy, nginx, cloudflare) that terminates TLS and forwards the websocket upgrade, then
-clients use `wss://`. Only then start it with `--trust-proxy`, so the client ip is read from the first hop of
-`X-Forwarded-For` (or `CF-Connecting-IP`) instead of the socket; without a proxy in front, leave it off or every
-client shares the proxy ip for rate limits and bans.
+clients use `wss://`. Only then start it with `--trust-proxy`. The client ip is then read from the last entry of
+`X-Forwarded-For` (the address your proxy saw), or from `CF-Connecting-IP` when there is no `X-Forwarded-For`. Behind
+a proxy without this flag, every client shares the proxy ip for rate limits and bans. Without a proxy, leave it off,
+because clients could then pick their own ip.
 
 nginx:
 

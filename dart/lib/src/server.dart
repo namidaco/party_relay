@@ -80,7 +80,7 @@ class PartyRelayServer {
     _pruneTimer?.cancel();
     _pruneTimer = null;
     for (final room in _rooms.values.toList(growable: false)) {
-      room.dispose();
+      room.closeRoom(ClosedReason.shutdown);
     }
     _rooms.clear();
     for (final sock in _sockets.toList(growable: false)) {
@@ -253,11 +253,13 @@ class PartyRelayServer {
 
   String _clientIp(HttpRequest req) {
     if (config.trustProxyHeaders) {
-      final forwarded = req.headers.value('x-forwarded-for');
+      // -- proxies append, so only the last entry was not written by the client
+      final forwarded = req.headers['x-forwarded-for']?.lastOrNull;
       if (forwarded != null) {
-        final first = forwarded.split(',').first.trim();
-        if (first.isNotEmpty) return first;
+        final last = forwarded.substring(forwarded.lastIndexOf(',') + 1).trim();
+        if (last.isNotEmpty) return last;
       }
+      // -- only read without a forwarded chain, a proxy that is not cloudflare passes it through untouched
       final cloudflare = req.headers.value('cf-connecting-ip')?.trim();
       if (cloudflare != null && cloudflare.isNotEmpty) return cloudflare;
     }
@@ -276,6 +278,7 @@ class PartyRelayServer {
     } catch (_) {
       return;
     }
+    ws.pingInterval = config.pingInterval;
     final sock = RelaySocket(ws, ip, config, DateTime.now().millisecondsSinceEpoch);
     _sockets.add(sock);
     sock.room = room.gone ? null : room;
@@ -301,6 +304,7 @@ class PartyRelayServer {
 
   // -- dart:io hands over whole messages, so frame limits can only be enforced here
   void _onFrame(RelaySocket sock, Object? event) {
+    if (sock.closed) return;
     try {
       final now = DateTime.now().millisecondsSinceEpoch;
       if (!sock.charge(now)) return;

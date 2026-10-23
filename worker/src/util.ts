@@ -92,8 +92,9 @@ export function clientIp(req: Request): string {
   if (cf) return cf.slice(0, 45);
   const xff = req.headers.get('x-forwarded-for');
   if (xff) {
-    const first = xff.split(',')[0]!.trim();
-    if (first) return first.slice(0, 45);
+    // proxies append, so only the last entry was not written by the client
+    const last = xff.slice(xff.lastIndexOf(',') + 1).trim();
+    if (last) return last.slice(0, 45);
   }
   return '127.0.0.1';
 }

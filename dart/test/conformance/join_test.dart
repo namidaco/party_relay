@@ -73,6 +73,16 @@ void main() {
     await rejects((c) => c.send({'t': Ctrl.join, 'pv': 1, 'name': 'ok', 'did': 'd', 'token': 12}));
   });
 
+  test('frames sent after a fatal error are ignored', () async {
+    final room = await relay.createRoom();
+    final host = await relay.join(room.code, token: room.token);
+    final client = await relay.connect(room.code);
+    client.send({'t': Ctrl.join, 'pv': 2, 'name': 'late', 'did': 'did-late'});
+    client.send({'t': Ctrl.join, 'pv': 1, 'name': 'late', 'did': 'did-late'});
+    await client.expectFatal(RelayErrors.versionMismatch);
+    await host.expectSilence();
+  });
+
   test('password rooms', () async {
     final room = await relay.createRoom(password: 'hunter2');
     final host = await relay.join(room.code, token: room.token);

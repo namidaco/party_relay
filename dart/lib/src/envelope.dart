@@ -93,6 +93,9 @@ abstract final class ClosedReason {
   static const String host = 'host';
   static const String idle = 'idle';
   static const String expired = 'expired';
+
+  /// a self-hosted relay stopped, rooms live in its memory only.
+  static const String shutdown = 'shutdown';
 }
 
 abstract final class RelayTier {

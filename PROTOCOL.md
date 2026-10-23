@@ -123,8 +123,13 @@ Client, first frame:
 ```
 
 - `token`: a token previously issued for this room (host token from create, or a member token from `welcome`). A valid
-  token resumes the same member number `n`, skips password/approval/full checks, and closes any older socket of that
-  member with `left r:"replaced"` not being broadcast (the member never left).
+  token resumes the same member number `n`, skips the ban/locked/password/approval checks, and closes any older socket
+  of that member with `left r:"replaced"` not being broadcast (the member never left). Leaving keeps the token valid.
+- A token only stays valid while its member was admitted under the room's current rules. When the host makes the room
+  stricter (`approval` turned on, `locked` turned on, or a password set or changed), the token of every member that is
+  not connected at that moment is revoked. Connected members keep theirs.
+- A resume still needs a free slot, unless the member is connected already or is the host. The host's slot stays
+  reserved while it is offline, so new members can never take it.
 - An invalid token is treated as no token.
 
 Server replies with one of:
@@ -162,7 +167,7 @@ Join attempts are limited to 20 per ip per minute per relay (wrong password atte
 | frame | reply |
 |---|---|
 | `{"t":"ping","c":<client ms>}` | `{"t":"pong","c":<same>,"s":<server ms>}` |
-| `{"t":"leave"}` | socket closed, others get `left r:"leave"` |
+| `{"t":"leave"}` | socket closed, others get `left r:"leave"`. a leaving host is replaced at once (see Host loss) |
 
 ### Control, host -> relay
 
@@ -170,17 +175,24 @@ Anyone else sending these gets a non fatal `error forbidden`.
 
 | frame | effect |
 |---|---|
-| `{"t":"kick","n":3,"ban":false}` | target gets fatal `error kicked` (or `banned`), others get `left` with `r` `kick`/`ban`. its token is revoked. with `ban` its `did` and ip are added to the room ban list |
+| `{"t":"kick","n":3,"ban":false}` | a connected target gets fatal `error kicked` (or `banned`) and others get `left` with `r` `kick`/`ban`. its token is revoked. with `ban` its `did` and ip are added to the room ban list (see below) |
 | `{"t":"unban","id":"<ban id>"}` | removes a ban |
 | `{"t":"approve","r":"<req id>","ok":true}` | resolves a pending join |
 | `{"t":"transfer","n":3}` | makes a connected member the host. everyone gets `host` |
-| `{"t":"successors","ns":[3,5]}` | ordered preference for automatic promotion |
-| `{"t":"opts","approval":true,"password":"x","locked":false,"public":true}` | partial update, `password: null` clears. everyone gets `opts` |
+| `{"t":"successors","ns":[3,5]}` | ordered preference for automatic promotion. cleared whenever the host changes |
+| `{"t":"opts","approval":true,"password":"x","locked":false,"public":true}` | partial update, `password: null` clears. everyone gets `opts`. a stricter room revokes absent tokens (see Join) |
 | `{"t":"close"}` | everyone gets `closed r:"host"`, sockets closed, room deleted |
 | `{"t":"summary","name":"..","title":"..","artist":".."}` | what `GET /v1/rooms` shows for this room. Nothing is broadcast |
 
-After `kick` with ban / `unban`, the host gets `{"t":"bans","list":[{"id":"..","name":".."}]}`. The host also gets it
-right after its `welcome` when the list is not empty.
+A ban covers the whole device. Every other member with the banned `did` is removed too, except the host. A connected
+one gets fatal `error banned` and everyone else gets `left r:"ban"` for it. An absent one loses its token. Pending joins
+from that `did` get fatal `error banned`, and the host gets `joinreqgone` for each. Members that only share the ip stay
+(they may be behind the same NAT).
+
+After `kick` with ban / `unban`, the host gets `{"t":"bans","list":[{"id":"..","name":".."}]}`.
+
+Whoever becomes host (its `welcome` as host, a `transfer`, or a promotion) gets `bans` when the list is not empty, then
+one `joinreq` for every pending join. A client drops the requests it knew when it gets a `welcome` or stops being host.
 
 ### Control, relay -> members
 
@@ -192,7 +204,7 @@ right after its `welcome` when the list is not empty.
 | `{"t":"opts", ...}` | same shape as `welcome.opts` |
 | `{"t":"joinreq","r":"<req id>","name":"..","did":".."}` | host only, a pending join |
 | `{"t":"joinreqgone","r":"<req id>"}` | host only, pending join went away (socket closed / timed out) |
-| `{"t":"closed","r":".."}` | `r`: `host`, `idle`, `expired` |
+| `{"t":"closed","r":".."}` | `r`: `host`, `idle`, `expired`, `shutdown` (a self-hosted relay stopped) |
 
 ### Host loss
 
@@ -201,11 +213,16 @@ After that the relay promotes the first connected member of `successors`, else t
 and everyone gets `host <new n> online:true`. With nobody connected the room stays hostless, the first member to
 (re)join becomes host. The old host resuming later is a normal member.
 
+A host that sends `leave` gets no grace. The promotion happens at once by the same rules, so the others get
+`left r:"leave"` and then `host <new n> online:true`, without a `host n online:false` in between. With nobody else
+connected the room becomes hostless at once.
+
 ### Room lifetime
 
 - closed by host `close`.
 - `idle`: no connected members for 10 minutes.
 - `expired`: 24h after creation.
+- `shutdown`: a self-hosted relay stopped, its rooms only lived in its memory.
 
 ### Data frames (binary)
 
@@ -235,4 +252,4 @@ dropped silently. Route 0 from the host itself is dropped. Unknown routes get `e
 - token bucket per socket: non host burst 40, refill 4/s. host burst 400, refill 60/s. over the limit gets non fatal
   `error rate_limited` (at most once per second) and the frame is dropped. 200 drops within a minute closes the socket
   with fatal `error rate_limited`.
-- `ping` is part of the bucket.
+- every frame counts against the bucket, `ping` and too large frames included.
