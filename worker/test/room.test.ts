@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { connect, join, makeRoom, wait } from './helpers';
+import { alarmRoom, call, connect, evictRoom, inRoom, join, makeRoom, wait } from './helpers';
 
 describe('join', () => {
   it('welcomes the creator with its token and keeps it host', async () => {
@@ -139,6 +139,54 @@ describe('join', () => {
     const other = await join(room.code, { name: 'ok', did: 'ok' }, '5.5.5.6');
     expect(other.welcome.t).toBe('welcome');
   });
+
+  it('keeps a limited ip limited while other ips flood the join limiter', async () => {
+    const room = await makeRoom();
+    await inRoom(room.code, (instance: any) => {
+      for (let i = 0; i < 511; i++) instance.joinRate(`2.0.${i >> 8}.${i & 255}`);
+      for (let i = 0; i < 20; i++) instance.joinRate('2.1.0.1');
+      expect(instance.joinRate('2.1.0.1')).toBe(false);
+      for (let i = 0; i < 10; i++) instance.joinRate(`2.2.0.${i}`);
+      expect(instance.joinRate('2.1.0.1')).toBe(false);
+    });
+  });
+
+  it('refuses more than 8 sockets of one ip that have not joined yet', async () => {
+    const room = await makeRoom();
+    const idle = [];
+    for (let i = 0; i < 8; i++) idle.push(await connect(room.code, '4.4.5.5'));
+    const res = await call(`/v1/room/${room.code}`, { headers: { upgrade: 'websocket', 'cf-connecting-ip': '4.4.5.5' } });
+    expect([res.status, await res.json()]).toEqual([429, { error: 'rate_limited' }]);
+    (await connect(room.code, '4.4.5.6')).close();
+
+    idle[0]!.send({ t: 'join', pv: 1, name: 'g', did: 'g', token: null, password: null });
+    expect((await idle[0]!.next()).t).toBe('welcome');
+    (await connect(room.code, '4.4.5.5')).close();
+  });
+
+  it('keeps at most 200 member records, dropping the oldest absent ones', { timeout: 30_000 }, async () => {
+    const room = await makeRoom();
+    await join(room.code, { token: room.token });
+    const first = await join(room.code, { name: 'first', did: 'first' }, '3.0.0.1');
+    first.sock.send({ t: 'leave' });
+    await first.sock.waitClosed();
+    for (let i = 0; i < 200; i++) {
+      const guest = await join(room.code, { name: `g${i}`, did: `g${i}` }, `3.1.${i >> 8}.${i & 255}`);
+      guest.sock.send({ t: 'leave' });
+      await guest.sock.waitClosed();
+    }
+
+    await inRoom(room.code, async (_instance: any, state: DurableObjectState) => {
+      const keys = [...(await state.storage.list({ prefix: 'm:' })).keys()];
+      expect(keys).toHaveLength(200);
+      expect(keys).toContain('m:1');
+      expect(keys).not.toContain('m:2');
+      expect(keys).not.toContain('m:3');
+      expect(keys).toContain('m:4');
+    });
+    const back = await join(room.code, { name: 'first', did: 'first', token: first.sock.token }, '3.0.0.1');
+    expect(back.welcome).toMatchObject({ t: 'welcome', n: 203 });
+  });
 });
 
 describe('approval', () => {
@@ -184,6 +232,19 @@ describe('approval', () => {
     const req = await host.sock.next();
     guest.sock.close();
     expect(await host.sock.next()).toEqual({ t: 'joinreqgone', r: req.r });
+  });
+
+  it('caps pending requests per ip', async () => {
+    const room = await makeRoom({ opts: { approval: true } });
+    await join(room.code, { token: room.token });
+    for (let i = 0; i < 3; i++) {
+      const guest = await join(room.code, { name: `g${i}`, did: `g${i}` }, '4.4.4.4');
+      expect(guest.welcome).toEqual({ t: 'pending' });
+    }
+    const fourth = await join(room.code, { name: 'g3', did: 'g3' }, '4.4.4.4');
+    expect(fourth.welcome).toEqual({ t: 'error', code: 'rate_limited', fatal: true });
+    const other = await join(room.code, { name: 'h', did: 'h' }, '4.4.4.5');
+    expect(other.welcome).toEqual({ t: 'pending' });
   });
 
   it('refuses to queue while the host is offline', async () => {
@@ -398,6 +459,37 @@ describe('host loss', () => {
 
     const old = await join(room.code, { name: 'host', did: 'host-did', token: room.token });
     expect(old.welcome).toMatchObject({ n: 1, host: 2, hostOnline: true });
+  });
+});
+
+describe('liveness', () => {
+  it('arms the alarm for the silence deadline of the members', async () => {
+    const room = await makeRoom();
+    const before = Date.now();
+    await join(room.code, { token: room.token });
+    await inRoom(room.code, async (_instance: any, state: DurableObjectState) => {
+      const at = await state.storage.getAlarm();
+      expect(at).toBeGreaterThanOrEqual(before + 150_000);
+      expect(at).toBeLessThanOrEqual(Date.now() + 150_000);
+    });
+  });
+
+  it('drops a silent host as lost, also after a hibernation, and promotes after the grace', async () => {
+    const room = await makeRoom();
+    const host = await join(room.code, { token: room.token });
+    const a = await join(room.code, { name: 'a', did: 'a' });
+    await host.sock.next();
+    await inRoom(room.code, (instance: any) => {
+      const ws = instance.index().get(1);
+      instance.setAtt(ws, { ...instance.attOf(ws), ls: Date.now() - 1_000_000 });
+    });
+    await evictRoom(room.code);
+
+    expect(await alarmRoom(room.code)).toBe(true);
+    expect(await a.sock.next()).toEqual({ t: 'left', n: 1, r: 'lost' });
+    expect(await a.sock.next()).toEqual({ t: 'host', n: 1, online: false });
+    expect((await host.sock.waitClosed()).code).toBe(1000);
+    expect(await a.sock.next(2000)).toEqual({ t: 'host', n: 2, online: true });
   });
 });
 

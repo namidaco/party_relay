@@ -289,6 +289,8 @@ void main() {
     expect(hidOf(one.code), matches(_hid));
     expect(hidOf(one.code), hidOf(two.code), reason: 'same creator');
     expect(hidOf(one.code), isNot(hidOf(three.code)), reason: 'another creator');
+    // -- the first 8 hex of sha-256("did-creator-a"), anyone could match a known did against it
+    expect(hidOf(one.code), isNot('58ba2f1a'), reason: 'keyed, not the bare identity digest');
 
     await oneHost.close();
     await twoHost.close();

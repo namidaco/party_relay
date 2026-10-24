@@ -29,12 +29,18 @@ export class OwnerDO extends DurableObject<RelayEnv> {
     else await this.ctx.storage.put('rooms', rooms);
   }
 
+  /** The alarm lands when the newest hit leaves the window, so a quiet ip leaves no record behind. */
   async hit(max: number, windowMs: number): Promise<boolean> {
     const now = Date.now();
     const kept = ((await this.ctx.storage.get<number[]>('hits')) ?? []).filter((t) => now - t < windowMs);
     const allowed = kept.length < max;
     if (allowed) kept.push(now);
     await this.ctx.storage.put('hits', kept);
+    if (allowed) await this.ctx.storage.setAlarm(now + windowMs);
     return allowed;
+  }
+
+  override async alarm(): Promise<void> {
+    await this.ctx.storage.delete('hits');
   }
 }

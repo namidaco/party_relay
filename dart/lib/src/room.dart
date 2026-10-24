@@ -17,14 +17,14 @@ class RelayRoom implements DirectoryRoom {
     required this.max,
     required this.config,
     required this.onGone,
+    required this.hid,
     required String hostName,
     required String hostDid,
     required String hostIp,
     required this.approval,
     required this.password,
     required this.public,
-  })  : createdAtMs = DateTime.now().millisecondsSinceEpoch,
-        hid = identityHid(hostDid) {
+  }) : createdAtMs = DateTime.now().millisecondsSinceEpoch {
     _members[1] = RelayMember(n: 1, name: hostName, did: hostDid, ip: hostIp, token: newToken());
     hostN = 1;
     _lifeTimer = Timer(config.roomLifetime, () => closeRoom(ClosedReason.expired));
@@ -39,7 +39,7 @@ class RelayRoom implements DirectoryRoom {
   final RoomGone onGone;
   final int createdAtMs;
 
-  /// first 8 hex of sha-256 over the creator identity, shown in the directory.
+  /// [identityHid] of the creator, shown in the directory.
   final String hid;
 
   bool approval;
@@ -93,6 +93,27 @@ class RelayRoom implements DirectoryRoom {
     _connected.remove(member);
   }
 
+  /// sockets per ip that have not sent their `join` yet.
+  final Map<String, int> _joinWaits = {};
+
+  /// false when [ip] already has [PartyRelayConfig.maxUnjoinedPerIp] sockets waiting to join.
+  bool reserveJoinWait(String ip) {
+    final waits = _joinWaits[ip] ?? 0;
+    if (waits >= config.maxUnjoinedPerIp) return false;
+    _joinWaits[ip] = waits + 1;
+    return true;
+  }
+
+  void releaseJoinWait(String ip) {
+    final waits = _joinWaits[ip];
+    if (waits == null) return;
+    if (waits > 1) {
+      _joinWaits[ip] = waits - 1;
+    } else {
+      _joinWaits.remove(ip);
+    }
+  }
+
   void join(RelaySocket s, Map<String, Object?> msg) {
     final joinPv = msg['pv'];
     final rawName = msg['name'];
@@ -124,6 +145,8 @@ class RelayRoom implements DirectoryRoom {
       final host = _hostSock;
       if (host == null) return s.fatal(RelayErrors.hostOffline);
       if (_pending.length >= config.maxPendingPerRoom) return s.fatal(RelayErrors.rateLimited);
+      final pendingFromIp = _pendingFrom(s.ip);
+      if (pendingFromIp >= config.maxPendingPerIp) return s.fatal(RelayErrors.rateLimited);
       final request = PendingJoin(id: newShortId(), sock: s, name: name, did: did);
       request.timer = Timer(config.pendingTimeout, () => _dropPending(request, RelayErrors.timeout));
       _pending[request.id] = request;
@@ -133,6 +156,14 @@ class RelayRoom implements DirectoryRoom {
       return;
     }
     _admit(s, name, did);
+  }
+
+  int _pendingFrom(String ip) {
+    var count = 0;
+    for (final request in _pending.values) {
+      if (request.sock.ip == ip) count++;
+    }
+    return count;
   }
 
   RelayMember? _memberByToken(String token) {
@@ -162,8 +193,7 @@ class RelayRoom implements DirectoryRoom {
     _connect(member, s);
     s.member = member;
     s.room = this;
-    s.joinTimer?.cancel();
-    s.joinTimer = null;
+    s.endJoinWait();
     _armIdle();
 
     if (hostN == null || !_members.containsKey(hostN)) {

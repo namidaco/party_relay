@@ -134,6 +134,26 @@ void main() {
     expect(entry['members'], 1);
   });
 
+  test('a hid secret keeps creator ids across restarts', () async {
+    Future<String> hidOn(PartyRelayConfig config) async {
+      final relay = await RelayTarget.start(config: config, local: true);
+      addTearDown(relay.dispose);
+      final created = relay.server!.createRoom(name: 'host', did: 'did-creator', public: true);
+      final host = await relay.join(created.code, name: 'host', token: created.token);
+      host.send({'t': Ctrl.summary, 'name': 'party'});
+      await host.roundTrip();
+      final entry = (await relay.getRooms()).find(created.code);
+      return entry!['hid'] as String;
+    }
+
+    final keyed = conformanceConfig().copyWith(hidSecret: 'stable');
+    final hid = await hidOn(keyed);
+    expect(await hidOn(keyed), hid, reason: 'same secret, same id after a restart');
+    expect(await hidOn(conformanceConfig()), isNot(hid), reason: 'no secret, a random key per start');
+    expect(PartyRelayConfig.fromEnvironment(const {'HID_SECRET': 'stable'}).hidSecret, 'stable');
+    expect(PartyRelayConfig.fromEnvironment(const {'HID_SECRET': ''}).hidSecret, isNull);
+  });
+
   test('a directory entry refreshes at most once per interval', () async {
     final relay = await RelayTarget.start(config: conformanceConfig().copyWith(directoryRefreshInterval: const Duration(milliseconds: 400)), local: true);
     addTearDown(relay.dispose);

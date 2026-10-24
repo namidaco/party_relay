@@ -14,6 +14,8 @@ usage: relay [options]
   --max-members <n>      members per room (env MAX_MEMBERS, default 100)
   --max-rooms <n>        open rooms on this relay (env MAX_ROOMS, default unlimited)
   --trust-proxy          read the client ip from X-Forwarded-For / CF-Connecting-IP (env TRUST_PROXY_HEADERS)
+  --hid-secret <s>       key of the creator ids in the directory, set it to keep them stable across restarts
+                         (env HID_SECRET, default a random key per start)
   --no-directory         stop serving GET /v1/rooms, public rooms are not browsable (env DIRECTORY=false)
   -h, --help             this text
 
@@ -52,6 +54,7 @@ Future<void> main(List<String> args) async {
 
   var config = PartyRelayConfig.fromEnvironment(env);
   final createPassword = flags['create-password'];
+  final hidSecret = flags['hid-secret'];
   final maxMembers = int.tryParse(flags['max-members'] ?? '');
   final maxRooms = int.tryParse(flags['max-rooms'] ?? '');
   config = config.copyWith(
@@ -60,6 +63,7 @@ Future<void> main(List<String> args) async {
     maxRoomsTotal: maxRooms != null && maxRooms > 0 ? maxRooms : null,
     trustProxyHeaders: booleans.contains('trust-proxy') ? true : null,
     directoryEnabled: booleans.contains('no-directory') ? false : null,
+    hidSecret: hidSecret != null && hidSecret.isNotEmpty ? hidSecret : null,
   );
 
   final host = flags['host'] ?? env['HOST'] ?? '0.0.0.0';

@@ -1,6 +1,15 @@
-import { env, runInDurableObject } from 'cloudflare:test';
+import {
+  createExecutionContext,
+  env,
+  runDurableObjectAlarm,
+  runInDurableObject,
+  waitOnExecutionContext,
+} from 'cloudflare:test';
+import type { DirectoryDO } from '../src/directory';
 import worker from '../src/index';
+import { JOIN_RATE_IPS, JOIN_RATE_WINDOW, LIST_RATE_IPS, LIST_RATE_WINDOW } from '../src/limits';
 import type { RelayEnv } from '../src/types';
+import { IpLimiter } from '../src/util';
 
 export const ENV = env as unknown as RelayEnv;
 
@@ -10,9 +19,18 @@ const inDO = runInDurableObject as unknown as (
 ) => Promise<void>;
 
 /** Runs `cb` inside the room's durable object. */
-export async function inRoom(code: string, cb: (instance: any) => unknown): Promise<void> {
+export async function inRoom(
+  code: string,
+  cb: (instance: any, state: DurableObjectState) => unknown,
+): Promise<void> {
   const ns = ENV.ROOM as unknown as DurableObjectNamespace;
   await inDO(ns.get(ns.idFromName(code)), cb);
+}
+
+/** Fires the room's alarm now, whenever it was due. */
+export async function alarmRoom(code: string): Promise<boolean> {
+  const ns = ENV.ROOM as unknown as DurableObjectNamespace;
+  return await runDurableObjectAlarm(ns.get(ns.idFromName(code)));
 }
 
 /** Drops everything the room keeps in memory, the way an eviction would. */
@@ -24,29 +42,42 @@ export async function evictRoom(code: string): Promise<void> {
     instance.atts = new WeakMap();
     instance.buckets = new WeakMap();
     instance.gone = new WeakSet();
-    instance.joinHits = new Map();
+    instance.joinHits = new IpLimiter(JOIN_RATE_WINDOW, JOIN_RATE_IPS);
+    instance.dirStub = null;
     instance.alarmAt = undefined;
     instance.tmCache = null;
   });
 }
 
-/** Empties the shared directory, entries and rate buckets alike. */
+/** The shared directory, as the worker and the rooms call it. */
+export function directory(): DurableObjectStub<DirectoryDO> {
+  return ENV.DIR.get(ENV.DIR.idFromName('global'));
+}
+
+/** Empties the shared directory, entries, rate buckets and hid secret alike. */
 export async function clearDirectory(): Promise<void> {
   const ns = ENV.DIR as unknown as DurableObjectNamespace;
-  await inDO(ns.get(ns.idFromName('global')), async (instance: any, state: DurableObjectState) => {
+  const clear = async (instance: any, state: DurableObjectState) => {
     await state.storage.deleteAll();
     instance.entries = null;
-    instance.hits = new Map();
-  });
+    instance.hits = new IpLimiter(LIST_RATE_WINDOW, LIST_RATE_IPS);
+    instance.secret = null;
+  };
+  const id = ns.idFromName('global');
+  // every test file loads the worker anew, which invalidates the instance an earlier file left behind
+  await inDO(ns.get(id), clear).catch(() => inDO(ns.get(id), clear));
 }
 
 export function wait(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-export function call(path: string, init?: RequestInit, overrides?: Partial<RelayEnv>): Promise<Response> {
+export async function call(path: string, init?: RequestInit, overrides?: Partial<RelayEnv>): Promise<Response> {
   const req = new Request(`http://relay.test${path}`, init);
-  return worker.fetch(req, { ...ENV, ...overrides } as RelayEnv);
+  const ctx = createExecutionContext();
+  const res = await worker.fetch(req, { ...ENV, ...overrides } as RelayEnv, ctx);
+  await waitOnExecutionContext(ctx);
+  return res;
 }
 
 export interface CreateBody {

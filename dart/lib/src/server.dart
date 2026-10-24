@@ -11,6 +11,8 @@ import 'member.dart';
 import 'rate_limit.dart';
 import 'room.dart';
 
+part 'server.websocket.dart';
+
 class PartyRoomCreated {
   const PartyRoomCreated({required this.code, required this.token, required this.max, required this.tier});
 
@@ -28,6 +30,8 @@ class PartyRelayServer {
     _joinLimiter = IpRateLimiter(config.joinLimit, config.joinWindow);
     _listLimiter = IpRateLimiter(config.listLimit, config.listWindow);
     _directory = RelayDirectory(config, _rooms);
+    final hidSecret = config.hidSecret;
+    _hidKey = hidSecret == null ? newHidKey() : utf8.encode(hidSecret);
     _pruneTimer = Timer.periodic(config.pruneInterval, (_) {
       final now = DateTime.now().millisecondsSinceEpoch;
       _createLimiter.prune(now);
@@ -57,6 +61,7 @@ class PartyRelayServer {
   late final IpRateLimiter _joinLimiter;
   late final IpRateLimiter _listLimiter;
   late final RelayDirectory _directory;
+  late final List<int> _hidKey;
   Timer? _pruneTimer;
 
   int get port => _http.port;
@@ -104,6 +109,7 @@ class PartyRelayServer {
     while (_rooms.containsKey(code)) {
       code = newRoomCode();
     }
+    final hid = identityHid(_hidKey, did);
     final room = RelayRoom(
       code: code,
       pv: pv,
@@ -113,6 +119,7 @@ class PartyRelayServer {
         if (identical(_rooms[r.code], r)) _rooms.remove(r.code);
         _directory.invalidate();
       },
+      hid: hid,
       hostName: name,
       hostDid: did,
       hostIp: ip,
@@ -272,17 +279,19 @@ class PartyRelayServer {
     if (room == null) return _error(req, 404, RelayErrors.notFound);
     if (!WebSocketTransformer.isUpgradeRequest(req)) return _error(req, 400, RelayErrors.badRequest);
     final ip = _clientIp(req);
+    if (!room.reserveJoinWait(ip)) return _error(req, 429, RelayErrors.rateLimited);
     final WebSocket ws;
     try {
-      ws = await WebSocketTransformer.upgrade(req, compression: CompressionOptions.compressionOff);
+      ws = await _WebSocketHandshake.upgrade(req, config.maxMessageBytes);
     } catch (_) {
+      room.releaseJoinWait(ip);
       return;
     }
     ws.pingInterval = config.pingInterval;
     final sock = RelaySocket(ws, ip, config, DateTime.now().millisecondsSinceEpoch);
     _sockets.add(sock);
     sock.room = room.gone ? null : room;
-    sock.joinTimer = Timer(config.joinTimeout, () => sock.fatal(RelayErrors.timeout));
+    sock.awaitJoin(config.joinTimeout);
     ws.listen(
       (Object? event) => _onFrame(sock, event),
       onError: (Object _) => _onSocketDone(sock),
@@ -294,15 +303,14 @@ class PartyRelayServer {
 
   void _onSocketDone(RelaySocket sock) {
     _sockets.remove(sock);
-    sock.joinTimer?.cancel();
-    sock.joinTimer = null;
+    sock.endJoinWait();
     try {
       sock.room?.onSocketClosed(sock);
     } catch (_) {}
     sock.closeNow();
   }
 
-  // -- dart:io hands over whole messages, so frame limits can only be enforced here
+  // -- whole messages, already capped at [PartyRelayConfig.maxMessageBytes] on the wire, protocol limits apply here
   void _onFrame(RelaySocket sock, Object? event) {
     if (sock.closed) return;
     try {
@@ -340,8 +348,7 @@ class PartyRelayServer {
       return sock.sendError(RelayErrors.badRequest);
     }
     if (decoded['t'] != Ctrl.join) return sock.fatal(RelayErrors.badRequest);
-    sock.joinTimer?.cancel();
-    sock.joinTimer = null;
+    sock.endJoinWait();
     if (!_joinLimiter.allow(sock.ip, now)) return sock.fatal(RelayErrors.rateLimited);
     room.join(sock, decoded);
   }

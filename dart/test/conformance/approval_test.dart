@@ -3,6 +3,8 @@ import 'package:test/test.dart';
 
 import 'harness.dart';
 
+const int kPendingPerIp = 3;
+
 void main() {
   late RelayTarget relay;
 
@@ -62,6 +64,32 @@ void main() {
     final guest = await relay.connect(room.code);
     guest.send({'t': Ctrl.join, 'pv': 1, 'name': 'guest', 'did': 'guest-did'});
     await guest.expectFatal(RelayErrors.hostOffline);
+  });
+
+  test('pending joins are capped per ip', () async {
+    final room = await relay.createRoom(approval: true);
+    final host = await relay.join(room.code, name: 'host', token: room.token);
+    final waiting = <TestClient>[];
+    final requests = <Map<String, dynamic>>[];
+    for (var i = 0; i < kPendingPerIp; i++) {
+      final guest = await relay.connect(room.code);
+      expect((await guest.joinRaw(name: 'g$i', did: 'did-g$i'))['t'], Ctrl.pending);
+      requests.add(await host.expectFrame(Ctrl.joinreq));
+      waiting.add(guest);
+    }
+
+    final extra = await relay.connect(room.code);
+    extra.send({'t': Ctrl.join, 'pv': 1, 'name': 'extra', 'did': 'did-extra'});
+    await extra.expectFatal(RelayErrors.rateLimited);
+
+    host.send({'t': Ctrl.approve, 'r': requests.first['r'], 'ok': true});
+    await waiting.first.expectFrame(Ctrl.welcome);
+    // -- the refused join never reached the host
+    await host.expectFrame(Ctrl.joined);
+
+    final next = await relay.connect(room.code);
+    expect((await next.joinRaw(name: 'next', did: 'did-next'))['t'], Ctrl.pending);
+    expect((await host.expectFrame(Ctrl.joinreq))['name'], 'next');
   });
 
   test('approve is host only', () async {

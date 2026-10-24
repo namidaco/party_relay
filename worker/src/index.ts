@@ -1,4 +1,5 @@
 import { verifyPatreon, verifySupabase } from './auth';
+import { normalizeCursor } from './directory';
 import { optString } from './envelope';
 import {
   BODY_MAX,
@@ -6,6 +7,7 @@ import {
   CREATE_RATE_WINDOW,
   DID_MAX,
   DIR_NAME,
+  LIST_CACHE_MS,
   LIST_RATE_MAX,
   NAME_MAX,
   PASSWORD_MAX,
@@ -19,7 +21,7 @@ import {
   timers,
 } from './limits';
 import { EV, type RelayEnv, type Tier } from './types';
-import { cleanText, clientIp, ctEq, json, normalizeCode, roomCode, sha256hex } from './util';
+import { cleanText, clientIp, ctEq, json, jsonText, normalizeCode, roomCode, sha256hex } from './util';
 
 export { RoomDO } from './room';
 export { OwnerDO } from './owner';
@@ -28,16 +30,16 @@ export { DirectoryDO } from './directory';
 type Rec = Record<string, unknown>;
 
 export default {
-  async fetch(req: Request, env: RelayEnv): Promise<Response> {
+  async fetch(req: Request, env: RelayEnv, ctx: ExecutionContext): Promise<Response> {
     try {
-      return await route(req, env);
+      return await route(req, env, ctx);
     } catch {
       return json({ error: 'bad_request' }, 400);
     }
   },
 } satisfies ExportedHandler<RelayEnv>;
 
-async function route(req: Request, env: RelayEnv): Promise<Response> {
+async function route(req: Request, env: RelayEnv, ctx: ExecutionContext): Promise<Response> {
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
@@ -65,7 +67,7 @@ async function route(req: Request, env: RelayEnv): Promise<Response> {
   }
 
   if (path === '/v1/rooms') {
-    if (req.method === 'GET') return await listRooms(req, env);
+    if (req.method === 'GET') return await listRooms(req, env, ctx);
     if (req.method !== 'POST') return json({ error: 'bad_request' }, 400);
     return await createRoom(req, env);
   }
@@ -84,18 +86,39 @@ async function route(req: Request, env: RelayEnv): Promise<Response> {
   return json({ error: 'not_found' }, 404);
 }
 
-async function listRooms(req: Request, env: RelayEnv): Promise<Response> {
+/** Pages are cached for a few seconds by their normalized query, only a miss reaches the directory and its limit. */
+async function listRooms(req: Request, env: RelayEnv, ctx: ExecutionContext): Promise<Response> {
   if (!directoryOn(env)) return json({ error: 'not_found' }, 404);
   const q = new URL(req.url).searchParams;
+  const limit = listLimit(q.get('limit'));
+  const after = normalizeCursor(q.get('after'));
+  const cacheMs = num(env.LIST_CACHE_MS, LIST_CACHE_MS);
+  const key = cacheMs > 0 ? new Request(`https://relay.invalid/v1/rooms?limit=${limit}&after=${after ?? ''}`) : null;
+  if (key) {
+    const hit = await caches.default.match(key).catch(() => undefined);
+    if (hit) {
+      const cachedText = await hit.text();
+      return jsonText(cachedText);
+    }
+  }
   const res = await env.DIR.get(env.DIR.idFromName(DIR_NAME)).list({
     ip: clientIp(req),
-    limit: listLimit(q.get('limit')),
-    after: q.get('after'),
+    limit,
+    after,
     ttlMs: directoryTtl(env),
     rateMax: num(env.LIST_RATE_MAX, LIST_RATE_MAX),
   });
   if (res.limited) return json({ error: 'rate_limited' }, 429);
-  return json({ rooms: res.rooms, next: res.next });
+  const text = JSON.stringify({ rooms: res.rooms, next: res.next });
+  if (key) {
+    const maxAge = Math.ceil(cacheMs / 1000);
+    const cached = new Response(text, {
+      headers: { 'content-type': 'application/json', 'cache-control': `max-age=${maxAge}` },
+    });
+    const storing = caches.default.put(key, cached).catch(() => {});
+    ctx.waitUntil(storing);
+  }
+  return jsonText(text);
 }
 
 async function createRoom(req: Request, env: RelayEnv): Promise<Response> {
@@ -137,8 +160,7 @@ async function createRoom(req: Request, env: RelayEnv): Promise<Response> {
   const ip = clientIp(req);
   const on = membershipOn(env);
 
-  // Abuse guard for the hosted relay only, a self-host instance serves a single lan.
-  const rateMax = num(env.CREATE_RATE_MAX, on ? CREATE_RATE_MAX : 0);
+  const rateMax = num(env.CREATE_RATE_MAX, CREATE_RATE_MAX);
   if (rateMax > 0) {
     const ok = await env.OWNER.get(env.OWNER.idFromName(`rate:${ip}`)).hit(rateMax, CREATE_RATE_WINDOW);
     if (!ok) return json({ error: 'rate_limited' }, 429);
@@ -183,8 +205,9 @@ async function createRoom(req: Request, env: RelayEnv): Promise<Response> {
   const { max, rooms } = tierLimits(env, tier);
   const ownerId = Number.isFinite(rooms) ? identity : null;
   const lifetime = timers(env).lifetime;
-  // stable per creator, a self-host relay has only the device to hash
-  const hid = (await sha256hex(on ? identity : did)).slice(0, 8);
+  // stable per creator, a self-host relay has only the device to go by
+  const hidIdentity = on ? identity : did;
+  const hid = directoryOn(env) ? await hidOf(env, hidIdentity) : '';
 
   const owner = ownerId != null ? env.OWNER.get(env.OWNER.idFromName(ownerId)) : null;
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -210,6 +233,16 @@ async function createRoom(req: Request, env: RelayEnv): Promise<Response> {
     if (owner) await owner.release(code);
   }
   return json({ error: 'upstream' }, 502);
+}
+
+/** Empty when the directory can not answer, the room only loses being hidden by its creator. */
+async function hidOf(env: RelayEnv, identity: string): Promise<string> {
+  try {
+    const dir = env.DIR.get(env.DIR.idFromName(DIR_NAME));
+    return await dir.hid(identity);
+  } catch {
+    return '';
+  }
 }
 
 function idOf(value: unknown): string | null {

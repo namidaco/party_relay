@@ -22,6 +22,9 @@ String newToken() => _base64Url(32);
 
 String newShortId() => _base64Url(9);
 
+/// 32 random bytes, the key behind [identityHid] when none is configured.
+Uint8List newHidKey() => _randomBytes(32);
+
 String newRoomCode() {
   final code = StringBuffer();
   for (var i = 0; i < kRoomCodeLength; i++) {
@@ -57,5 +60,9 @@ String? sanitizeName(String raw, {int max = kMaxNameLength}) {
   return name == null || name.isEmpty ? null : name;
 }
 
-/// `hid`, the first 8 hex of sha-256 over the room owner identity.
-String identityHid(String identity) => sha256Hex(utf8.encode(identity), kHidBytes);
+/// `hid`, the first 8 hex of hmac-sha256 over the room owner identity. keyed, so a known identity can not be matched
+/// against it.
+String identityHid(List<int> key, String identity) {
+  final message = utf8.encode(identity);
+  return hmacSha256Hex(key, message, kHidBytes);
+}

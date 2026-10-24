@@ -52,7 +52,7 @@ class RelaySocket {
   RelayRoom? room;
   RelayMember? member;
   PendingJoin? pending;
-  Timer? joinTimer;
+  Timer? _joinTimer;
 
   bool _closed = false;
   int _drops = 0;
@@ -84,11 +84,24 @@ class RelaySocket {
     closeNow();
   }
 
+  /// the socket holds a join wait of [room] (taken with [RelayRoom.reserveJoinWait]) until [endJoinWait].
+  void awaitJoin(Duration timeout) {
+    _joinTimer = Timer(timeout, () => fatal(RelayErrors.timeout));
+  }
+
+  /// the `join` frame arrived or the socket is closing, frees the join wait.
+  void endJoinWait() {
+    final timer = _joinTimer;
+    if (timer == null) return;
+    timer.cancel();
+    _joinTimer = null;
+    room?.releaseJoinWait(ip);
+  }
+
   void closeNow() {
     if (_closed) return;
     _closed = true;
-    joinTimer?.cancel();
-    joinTimer = null;
+    endJoinWait();
     try {
       ws.close(kRelayCloseCode);
     } catch (_) {}

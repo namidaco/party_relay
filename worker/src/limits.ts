@@ -10,15 +10,20 @@ export const BURST_HOST = 400;
 export const REFILL_HOST = 60;
 
 export const MAX_PENDING = 20;
+export const MAX_PENDING_PER_IP = 3;
+export const MAX_UNJOINED_PER_IP = 8;
+export const MAX_RETAINED_MEMBERS = 200;
 export const MAX_BANS = 500;
 export const MAX_SUCCESSORS = 64;
 
 export const JOIN_RATE_MAX = 20;
 export const JOIN_RATE_WINDOW = 60_000;
+export const JOIN_RATE_IPS = 512;
 export const CREATE_RATE_MAX = 10;
 export const CREATE_RATE_WINDOW = 600_000;
 export const LIST_RATE_MAX = 60;
 export const LIST_RATE_WINDOW = 60_000;
+export const LIST_RATE_IPS = 4096;
 
 export const NAME_MAX = 32;
 export const DID_MAX = 64;
@@ -34,6 +39,7 @@ export const DIR_TTL_MS = 900_000;
 export const DIR_MAX_ENTRIES = 2000;
 export const LIST_LIMIT_DEFAULT = 25;
 export const LIST_LIMIT_MAX = 50;
+export const LIST_CACHE_MS = 5000;
 
 export const TIER_LIMITS: Record<Exclude<Tier, 'selfhost'>, { max: number; rooms: number }> = {
   cutie: { max: 50, rooms: 2 },
@@ -80,6 +86,7 @@ export interface Timers {
   lifetime: number;
   dropClose: number;
   refresh: number;
+  liveness: number;
 }
 
 export function timers(env: RelayEnv): Timers {
@@ -91,6 +98,8 @@ export function timers(env: RelayEnv): Timers {
     lifetime: num(env.ROOM_LIFETIME_MS, 86_400_000),
     dropClose: num(env.RATE_DROP_CLOSE, 200),
     refresh: num(env.DIRECTORY_REFRESH_MS, DIR_REFRESH_MS),
+    // 0 disables the sweep
+    liveness: num(env.LIVENESS_MS, 150_000) || Infinity,
   };
 }
 

@@ -33,10 +33,13 @@ class PartyRelayConfig {
     this.directoryListLimit = 50,
     this.directoryPageSize = 25,
     this.maxPendingPerRoom = 20,
+    this.maxPendingPerIp = 3,
+    this.maxUnjoinedPerIp = 8,
     this.maxBansPerRoom = 500,
     this.maxRetainedMembers = 200,
     this.maxSuccessors = 32,
     this.trustProxyHeaders = false,
+    this.hidSecret,
     this.pruneInterval = const Duration(minutes: 5),
   });
 
@@ -71,6 +74,13 @@ class PartyRelayConfig {
   final int maxGuestFrameBytes;
   final int maxHostFrameBytes;
   final int maxCreateBodyBytes;
+
+  /// what [maxMessageBytes] allows past [maxHostFrameBytes], so a frame a bit over a limit still gets the non fatal
+  /// `too_large`.
+  static const int _kMessageSlackBytes = 4 * 1024;
+
+  /// an incoming websocket message (all its fragments) past this drops the connection before it is buffered.
+  int get maxMessageBytes => maxHostFrameBytes + _kMessageSlackBytes;
 
   final int guestBurst;
   final double guestRefillPerSecond;
@@ -107,6 +117,14 @@ class PartyRelayConfig {
   final int directoryPageSize;
 
   final int maxPendingPerRoom;
+
+  /// pending joins of one ip in one room, past it the join gets a fatal `rate_limited`.
+  final int maxPendingPerIp;
+
+  /// sockets of one ip in one room that have not sent their `join` yet, past it the upgrade gets
+  /// `429 {"error":"rate_limited"}`.
+  final int maxUnjoinedPerIp;
+
   final int maxBansPerRoom;
 
   /// disconnected members kept around for token resume, oldest are dropped past this.
@@ -115,6 +133,9 @@ class PartyRelayConfig {
 
   /// read the client ip from the last `X-Forwarded-For` entry, else `CF-Connecting-IP`, instead of the socket.
   final bool trustProxyHeaders;
+
+  /// key of the directory `hid`. null = 32 random bytes per start, so every creator id changes on restart.
+  final String? hidSecret;
 
   final Duration pruneInterval;
 
@@ -135,6 +156,7 @@ class PartyRelayConfig {
 
     const def = PartyRelayConfig();
     final password = env['CREATE_PASSWORD'];
+    final hidSecret = env['HID_SECRET'];
     final maxRooms = int.tryParse(env['MAX_ROOMS'] ?? '');
     return PartyRelayConfig(
       hostGrace: ms('HOST_GRACE_MS', def.hostGrace),
@@ -154,6 +176,7 @@ class PartyRelayConfig {
       directoryEntryTtl: ms('DIRECTORY_TTL_MS', def.directoryEntryTtl),
       rateDropClose: count('RATE_DROP_CLOSE', def.rateDropClose),
       trustProxyHeaders: env['TRUST_PROXY_HEADERS'] == 'true' || env['TRUST_PROXY_HEADERS'] == '1',
+      hidSecret: hidSecret != null && hidSecret.isNotEmpty ? hidSecret : null,
     );
   }
 
@@ -191,10 +214,13 @@ class PartyRelayConfig {
     int? directoryListLimit,
     int? directoryPageSize,
     int? maxPendingPerRoom,
+    int? maxPendingPerIp,
+    int? maxUnjoinedPerIp,
     int? maxBansPerRoom,
     int? maxRetainedMembers,
     int? maxSuccessors,
     bool? trustProxyHeaders,
+    String? hidSecret,
     Duration? pruneInterval,
   }) {
     return PartyRelayConfig(
@@ -230,10 +256,13 @@ class PartyRelayConfig {
       directoryListLimit: directoryListLimit ?? this.directoryListLimit,
       directoryPageSize: directoryPageSize ?? this.directoryPageSize,
       maxPendingPerRoom: maxPendingPerRoom ?? this.maxPendingPerRoom,
+      maxPendingPerIp: maxPendingPerIp ?? this.maxPendingPerIp,
+      maxUnjoinedPerIp: maxUnjoinedPerIp ?? this.maxUnjoinedPerIp,
       maxBansPerRoom: maxBansPerRoom ?? this.maxBansPerRoom,
       maxRetainedMembers: maxRetainedMembers ?? this.maxRetainedMembers,
       maxSuccessors: maxSuccessors ?? this.maxSuccessors,
       trustProxyHeaders: trustProxyHeaders ?? this.trustProxyHeaders,
+      hidSecret: hidSecret ?? this.hidSecret,
       pruneInterval: pruneInterval ?? this.pruneInterval,
     );
   }

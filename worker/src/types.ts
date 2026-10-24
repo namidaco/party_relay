@@ -23,6 +23,8 @@ export interface RelayEnv {
   DIRECTORY_REFRESH_MS?: string;
   DIRECTORY_TTL_MS?: string;
   LIST_RATE_MAX?: string;
+  LIST_CACHE_MS?: string;
+  LIVENESS_MS?: string;
 }
 
 export type Tier = 'cutie' | 'pookie' | 'patootie' | 'owner' | 'selfhost';
@@ -48,7 +50,7 @@ export interface RoomState {
   maxMembers: number;
   tier: Tier;
   ownerId: string | null;
-  /** first 8 hex of sha-256 of the owner identity, shown in the directory */
+  /** first 8 hex of the directory's hmac of the owner identity, empty when it could not be made */
   hid: string;
   hostN: number | null;
   nextN: number;
@@ -88,6 +90,8 @@ export interface Att {
   p?: string;
   /** pending deadline */
   pd?: number;
+  /** last frame from a member, rewritten coarsely */
+  ls?: number;
 }
 
 export interface CreateInit {

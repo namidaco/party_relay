@@ -3,6 +3,8 @@ import 'package:test/test.dart';
 
 import 'harness.dart';
 
+const int kUnjoinedPerIp = 8;
+
 void main() {
   late RelayTarget relay;
 
@@ -13,6 +15,23 @@ void main() {
     final room = await relay.createRoom();
     final client = await relay.connect(room.code);
     await client.expectFatal(RelayErrors.timeout, const Duration(milliseconds: kJoinTimeoutMs * 4));
+  });
+
+  test('sockets waiting to join are capped per ip', () async {
+    final room = await relay.createRoom();
+    final other = await relay.createRoom();
+    // -- in parallel, the join timeout is short
+    final waiting = await Future.wait([for (var i = 0; i < kUnjoinedPerIp; i++) relay.connect(room.code)]);
+
+    final refused = await relay.upgrade(room.code);
+    expect(refused, isA<HttpResult>(), reason: 'upgrade number ${kUnjoinedPerIp + 1} must be refused');
+    expect((refused as HttpResult).status, 429);
+    expect(refused.error, RelayErrors.rateLimited);
+    await relay.connect(other.code);
+
+    await waiting.first.join(name: 'first');
+    final next = await relay.connect(room.code);
+    await next.join(name: 'next');
   });
 
   test('welcome shape and members list', () async {

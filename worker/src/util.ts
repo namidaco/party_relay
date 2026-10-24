@@ -47,7 +47,16 @@ export function b64url(bytes: Uint8Array): string {
 
 export async function sha256hex(input: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', encoder.encode(input));
-  const bytes = new Uint8Array(digest);
+  return hex(digest);
+}
+
+export async function hmacHex(key: CryptoKey, input: string): Promise<string> {
+  const mac = await crypto.subtle.sign('HMAC', key, encoder.encode(input));
+  return hex(mac);
+}
+
+function hex(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
   let out = '';
   for (let i = 0; i < bytes.length; i++) out += bytes[i]!.toString(16).padStart(2, '0');
   return out;
@@ -81,7 +90,11 @@ export function utf8Len(s: string): number {
 }
 
 export function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
+  return jsonText(JSON.stringify(body), status);
+}
+
+export function jsonText(text: string, status = 200): Response {
+  return new Response(text, {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
   });
@@ -97,4 +110,39 @@ export function clientIp(req: Request): string {
     if (last) return last.slice(0, 45);
   }
   return '127.0.0.1';
+}
+
+/** Hits per ip within a sliding window. Past `maxIps` it forgets expired ips first, then the least recent. */
+export class IpLimiter {
+  private hits = new Map<string, number[]>();
+
+  constructor(
+    private readonly windowMs: number,
+    private readonly maxIps: number,
+  ) {}
+
+  hit(ip: string, max: number): boolean {
+    if (max <= 0) return true;
+    const now = Date.now();
+    const previous = this.hits.get(ip) ?? [];
+    const kept = previous.filter((t) => now - t < this.windowMs);
+    const allowed = kept.length < max;
+    if (allowed) kept.push(now);
+    // re-inserted, so the map stays ordered from least to most recent
+    this.hits.delete(ip);
+    if (this.hits.size >= this.maxIps) this.prune(now);
+    this.hits.set(ip, kept);
+    return allowed;
+  }
+
+  private prune(now: number): void {
+    for (const [ip, kept] of this.hits) {
+      const last = kept[kept.length - 1]!;
+      if (now - last >= this.windowMs) this.hits.delete(ip);
+    }
+    for (const ip of this.hits.keys()) {
+      if (this.hits.size < this.maxIps) break;
+      this.hits.delete(ip);
+    }
+  }
 }

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "dev:conformance": "wrangler dev --port 8787 --var MEMBERSHIP:off --var HOST_GRACE_MS:1500 --var PENDING_TIMEOUT_MS:1500 --var JOIN_TIMEOUT_MS:1000 --var SELFHOST_MAX_MEMBERS:4 --var JOIN_RATE_MAX:0 --var DIRECTORY_REFRESH_MS:0 --var LIST_RATE_MAX:0",
+    "dev:conformance": "wrangler dev --port 8787 --var MEMBERSHIP:off --var HOST_GRACE_MS:1500 --var PENDING_TIMEOUT_MS:1500 --var JOIN_TIMEOUT_MS:1000 --var SELFHOST_MAX_MEMBERS:4 --var JOIN_RATE_MAX:0 --var DIRECTORY_REFRESH_MS:0 --var CREATE_RATE_MAX:0 --var LIST_RATE_MAX:0 --var LIST_CACHE_MS:0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "deploy": "wrangler deploy"

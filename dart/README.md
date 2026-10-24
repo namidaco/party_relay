@@ -26,6 +26,7 @@ dart compile exe bin/relay.dart -o relay && ./relay --port 8787
 | `--max-members <n>` | `MAX_MEMBERS` | 100 |
 | `--max-rooms <n>` | `MAX_ROOMS` | unlimited |
 | `--trust-proxy` | `TRUST_PROXY_HEADERS` | false |
+| `--hid-secret <s>` | `HID_SECRET` | a random key per start |
 | `--no-directory` | `DIRECTORY` | directory on (`GET /v1/rooms` served) |
 
 Timers and limits, for tests and tuning: `HOST_GRACE_MS` (60000), `PENDING_TIMEOUT_MS` (120000), `JOIN_TIMEOUT_MS`
@@ -40,7 +41,8 @@ that long stops being listed), `RATE_DROP_CLOSE` (200 dropped frames per minute 
 connected member and are not locked. The rest, including every unlisted room, is invisible, so a code can never be
 guessed from it. The listing is derived from the live rooms, an entry refreshes at most once per
 `DIRECTORY_REFRESH_MS` (becoming public, unlisted or closed applies at once) and `hid` is the first 8 hex of the
-sha-256 of the creator `did`.
+HMAC-SHA256 of the creator `did`, keyed with the hid secret. Set `--hid-secret` to keep creator ids stable across
+restarts, so the creators people chose to hide stay hidden.
 
 ## In the app
 

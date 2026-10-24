@@ -16,8 +16,10 @@ export default defineWorkersConfig({
             HOST_GRACE_MS: '300',
             IDLE_TIMEOUT_MS: '1500',
             DIRECTORY_REFRESH_MS: '400',
-            // the whole suite lists from one ip, the limit is exercised with a per call override
+            // the whole suite creates and lists from one ip, the limits and the cache are exercised with per call overrides
+            CREATE_RATE_MAX: '0',
             LIST_RATE_MAX: '0',
+            LIST_CACHE_MS: '0',
           },
         },
       },

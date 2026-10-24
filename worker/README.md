@@ -10,10 +10,10 @@ src/index.ts      http routing, create validation, membership dispatch, GET /v1/
 src/auth.ts       patreon / supabase verification, 10 min cache keyed by the hash of the proof
 src/room.ts       RoomDO: join, control frames, data routing, alarms, directory pushes
 src/owner.ts      OwnerDO: rooms per identity, create attempts per ip
-src/directory.ts  DirectoryDO: public entries, ttl pruning, paging, list rate limit
+src/directory.ts  DirectoryDO: public entries, ttl pruning, paging, list rate limit, the hid secret
 src/envelope.ts   frame parsing and validation
 src/limits.ts     tiers, sizes, buckets, timers from config
-src/util.ts       room codes, tokens, sha-256, constant time compare
+src/util.ts       room codes, tokens, sha-256 / hmac, constant time compare, the per ip limiter
 ```
 
 ## Develop
@@ -61,11 +61,13 @@ All optional, all strings (`wrangler.jsonc` `vars`, or `--var K:V` in dev).
 | `ROOM_LIFETIME_MS` | `86400000` | hard room expiry |
 | `RATE_DROP_CLOSE` | `200` | dropped frames within a minute before the socket is closed |
 | `JOIN_RATE_MAX` | `20` | join attempts per ip per minute per room, `0` disables |
-| `CREATE_RATE_MAX` | `10` on, `0` off | create attempts per ip per 10 minutes |
+| `CREATE_RATE_MAX` | `10` | create attempts per ip per 10 minutes, `0` disables |
 | `DIRECTORY` | `on` | `off` drops `GET /v1/rooms` (404) and every directory push |
 | `DIRECTORY_REFRESH_MS` | `60000` | how often a listed room refreshes its entry (member count, `at`) |
 | `DIRECTORY_TTL_MS` | `900000` | an entry older than this is pruned on the next listing |
-| `LIST_RATE_MAX` | `60` | `GET /v1/rooms` per ip per minute, `0` disables |
+| `LIST_RATE_MAX` | `60` | `GET /v1/rooms` per ip per minute, `0` disables. Only cache misses count |
+| `LIST_CACHE_MS` | `5000` | how long a `GET /v1/rooms` page is served from the edge cache, rounded up to whole seconds, `0` disables |
+| `LIVENESS_MS` | `150000` | a member that sends nothing for this long is dropped as `lost`, `0` disables |
 
 ## Deploy your own
 
@@ -83,8 +85,8 @@ A self-host relay needs no membership backend:
 ```
 
 Then `npx wrangler deploy` on your own account and point the app at `https://<worker>.<subdomain>.workers.dev`.
-With `MEMBERSHIP=off` there is no rooms-per-identity limit and no create rate limit, so use `CREATE_PASSWORD`
-if the url is public. For a lan party prefer `../dart`, it needs no account at all.
+With `MEMBERSHIP=off` there is no rooms-per-identity limit (only the create rate limit per ip), so use
+`CREATE_PASSWORD` if the url is public. For a lan party prefer `../dart`, it needs no account at all.
 
 ## Expected cost
 
@@ -94,18 +96,21 @@ The free plan covers a small relay, the design keeps it there:
   messages per request**, so a 5 member party at 4 frames/s costs roughly one request per second. Free plan:
   1M requests/month.
 - **Duration**: hibernation means an idle room (no frames) is evicted from memory and bills nothing. Rooms keep
-  exactly one alarm armed (the nearest of join / pending / host grace / idle / expiry), so an idle room wakes at
-  most once — not periodically.
-- **Storage**: one row for the room plus one per member; nothing is written on the data path. Rate buckets live in
-  memory only, so an eviction resets them to full, which is harmless because eviction implies the socket was idle
-  long enough to refill anyway.
+  exactly one alarm armed (the nearest of join / pending / host grace / idle / expiry / member silence). A room
+  with nobody connected wakes at most once. A room with members wakes every couple of minutes to drop the ones
+  that went silent (a phone that vanished without closing its socket).
+- **Storage**: one row for the room plus one per member, and at most 200 are kept for members who are not
+  connected (the oldest go first). Nothing is written to storage on the data path. Rate buckets live in memory
+  only, so an eviction resets them to full, which is harmless because eviction implies the socket was idle long
+  enough to refill anyway.
 - **Rooms** close themselves: host `close`, 10 minutes with nobody connected, or 24h after creation, and the
   `OwnerDO` entry is released at the same time.
 - **Directory**: only public rooms cost anything. A listed room pushes its entry at most once per
   `DIRECTORY_REFRESH_MS` (~60 requests/hour), piggybacked on traffic it already handles rather than on an alarm of
   its own; joins and leaves ride the next scheduled push instead of pushing one each. Becoming public, a new
   `summary`, and becoming unlisted / locked / empty / closed apply at once. Unlisted rooms never push, and the
-  directory has no alarm either: stale entries are pruned when somebody lists.
+  directory has no alarm either: stale entries are pruned when somebody lists. `GET /v1/rooms` pages are served
+  from the edge cache for 5 seconds, so repeated listings do not reach the directory.
 
 Rough figures: a room with a host and 4 guests, one hour of playback with chat, sits well under 100k DO requests.
 The practical ceiling on the free plan is the 1M requests and 1000 concurrent DO limit, not storage.

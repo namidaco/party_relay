@@ -65,7 +65,7 @@ Errors: HTTP `4xx` with `{"error": "<code>"}`:
 | `membership_invalid` | 403 | proof rejected, expired, or tier below cutie |
 | `bad_password` | 403 | wrong create password (self-host) |
 | `rooms_limit` | 429 | identity already owns its max number of open rooms |
-| `rate_limited` | 429 | too many create attempts from this ip |
+| `rate_limited` | 429 | too many create attempts from this ip (also on the other endpoints, see their own limits) |
 | `upstream` | 502 | patreon/supabase unreachable |
 
 Tier limits (worker): cutie 50 members / 2 rooms, pookie 100 / 3, patootie 200 / 4, owner 500 / 10. Self-host: from
@@ -91,21 +91,27 @@ back, and it is null on the last page.
 }
 ```
 
-- `hid` is the first 8 hex of SHA-256 of the room owner's identity (`patreon:<id>`, `supabase:<id>`, or the host's
-  `did` when membership is off). It is stable per creator and reveals nothing; clients use it to hide a creator's
-  rooms locally.
+- `hid` is the first 8 hex of HMAC-SHA256 of the room owner's identity (`patreon:<id>`, `supabase:<id>`, or the host's
+  `did` when membership is off), keyed with a secret only the relay knows. It is stable per creator on that relay and
+  can't be computed from a known identity; clients use it to hide a creator's rooms locally. A self-hosted relay
+  without a configured secret picks a new one on every start, so its ids change then. It can be `""` when the relay
+  could not compute it, and clients must never hide rooms by an empty `hid`.
 - `title` / `artist` are absent when the host has not sent them, or cleared them.
-- `at` is when the entry was last refreshed. `members` can lag by up to the relay's refresh interval (60s by default).
+- `at` is when the entry was last refreshed. `members` can lag by up to the relay's refresh interval (60s by default),
+  and the worker caches each page for up to 5s more.
 - Listed: public rooms with a name, at least one connected member, and `locked` false. Everything else is invisible,
   including unlisted rooms, so a code is never guessable from this endpoint.
 - Order: `members` descending, then `at` descending, then `code`. Stable enough for `next` to page through.
 - Entries expire 15 minutes after their last refresh, so a relay that loses a room never lists a ghost.
-- Rate limited to 60 requests per ip per minute, over that gives `429 {"error":"rate_limited"}`.
+- Rate limited to 60 requests per ip per minute, over that gives `429 {"error":"rate_limited"}`. On the worker only
+  requests that miss its cache count.
 
 ### `GET /v1/room/<CODE>` websocket upgrade
 
-`404 {"error":"not_found"}` if the room does not exist (no upgrade). Otherwise upgrade, then the client must send a
-`join` text frame within 10s or the socket is closed with `error timeout`.
+`404 {"error":"not_found"}` if the room does not exist (no upgrade). `429 {"error":"rate_limited"}` (no upgrade) when
+this ip already has 8 sockets in this room that have not sent their `join` yet. Otherwise upgrade, then the client must
+send a `join` text frame within 10s or the socket is closed with `error timeout`. The relay never negotiates websocket
+extensions (no compression).
 
 ## Frames
 
@@ -151,14 +157,17 @@ keeps the latest one and refreshes the directory entry at most once every 60s (c
 becomes public, unlisted or closed, which apply at once.
 
 `pending`: the room needs host approval, the socket stays open and gets `welcome` or a fatal `error rejected` later.
-Pending requests time out after 120s (`error timeout`). If the host is offline, `error host_offline`.
+Pending requests time out after 120s (`error timeout`). If the host is offline, `error host_offline`. A room holds at
+most 20 pending requests, and at most 3 from one ip; past either, the join gets fatal `error rate_limited`.
 
 `members` lists currently connected members only (including the receiver). `opts.password` is a bool (is one set).
 
 Fatal join errors: `not_found`, `version_mismatch` (carries `"pv": <room pv>`), `full`, `banned`, `bad_password`,
 `rejected`, `locked`, `timeout`, `host_offline`, `rate_limited`, `bad_request`.
 
-Member numbers `n` start at 1 (the creator) and only grow, never reused.
+Member numbers `n` start at 1 (the creator) and only grow, never reused. A room keeps at most 200 member records.
+Past that, absent members lose their token oldest first (never the host or a connected member), so they come back as a
+new member.
 
 Join attempts are limited to 20 per ip per minute per relay (wrong password attempts count).
 
@@ -249,7 +258,13 @@ dropped silently. Route 0 from the host itself is dropped. Unknown routes get `e
 
 - text frame max 2 KiB.
 - binary frame max: 16 KiB for non hosts, 1 MiB for the host. bigger gets non fatal `error too_large`, dropped.
+- a message over 1 MiB + 4 KiB (all its fragments together), or a control frame over 125 bytes, drops the connection
+  at once without an error or close frame (the client sees 1006), joined or not, so the relay never buffers it. the
+  worker leaves this to the platform's own message size limit.
 - token bucket per socket: non host burst 40, refill 4/s. host burst 400, refill 60/s. over the limit gets non fatal
   `error rate_limited` (at most once per second) and the frame is dropped. 200 drops within a minute closes the socket
   with fatal `error rate_limited`.
 - every frame counts against the bucket, `ping` and too large frames included.
+- a joined socket that goes silent is dropped as `left r:"lost"` (host grace applies as usual). the Dart relay pings at
+  the websocket level every 30s, the worker drops a socket that sent no frame for 150s (120s at worst), so clients
+  send `ping` at least every 60s.

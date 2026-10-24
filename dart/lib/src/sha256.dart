@@ -77,9 +77,33 @@ Uint8List sha256(List<int> data) {
 }
 
 /// lower case hex of the first [bytes] digest bytes.
-String sha256Hex(List<int> data, [int bytes = 32]) {
-  final digest = sha256(data);
-  final count = bytes < 32 ? bytes : 32;
+String sha256Hex(List<int> data, [int bytes = 32]) => _hex(sha256(data), bytes);
+
+const int _kBlockBytes = 64;
+const int _kDigestBytes = 32;
+
+/// rfc 2104 hmac over [sha256].
+Uint8List hmacSha256(List<int> key, List<int> message) {
+  final blockKey = key.length > _kBlockBytes ? sha256(key) : key;
+  final block = Uint8List(_kBlockBytes);
+  block.setRange(0, blockKey.length, blockKey);
+  final inner = Uint8List(_kBlockBytes + message.length);
+  final outer = Uint8List(_kBlockBytes + _kDigestBytes);
+  for (var i = 0; i < _kBlockBytes; i++) {
+    inner[i] = block[i] ^ 0x36;
+    outer[i] = block[i] ^ 0x5c;
+  }
+  inner.setRange(_kBlockBytes, inner.length, message);
+  final innerDigest = sha256(inner);
+  outer.setRange(_kBlockBytes, outer.length, innerDigest);
+  return sha256(outer);
+}
+
+/// lower case hex of the first [bytes] bytes of [hmacSha256].
+String hmacSha256Hex(List<int> key, List<int> message, [int bytes = 32]) => _hex(hmacSha256(key, message), bytes);
+
+String _hex(Uint8List digest, int bytes) {
+  final count = bytes < _kDigestBytes ? bytes : _kDigestBytes;
   final out = StringBuffer();
   for (var i = 0; i < count; i++) {
     out.writeCharCode(_hexDigits.codeUnitAt(digest[i] >> 4));

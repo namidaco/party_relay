@@ -1,5 +1,6 @@
+import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { call, connect, makeRoom, post } from './helpers';
+import { ENV, call, connect, makeRoom, post, wait } from './helpers';
 
 describe('GET /v1/info', () => {
   it('reports the relay config', async () => {
@@ -97,6 +98,26 @@ describe('POST /v1/rooms', () => {
     expect(blocked.status).toBe(429);
     expect(blocked.body.error).toBe('rate_limited');
     expect((await post({ pv: 1, name: 'a', did: 'b' }, overrides, '9.9.9.8')).status).toBe(200);
+  });
+
+  it('limits create attempts per ip with membership off too', async () => {
+    const overrides = { CREATE_RATE_MAX: undefined };
+    for (let i = 0; i < 10; i++) {
+      expect((await post({ pv: 1, name: 'a', did: 'b' }, overrides, '9.9.7.1')).status).toBe(200);
+    }
+    const blocked = await post({ pv: 1, name: 'a', did: 'b' }, overrides, '9.9.7.1');
+    expect([blocked.status, blocked.body.error]).toEqual([429, 'rate_limited']);
+  });
+
+  it('forgets an ip once its create attempts left the window, keeping room claims', async () => {
+    const stub = ENV.OWNER.get(ENV.OWNER.idFromName('rate:9.9.7.2'));
+    expect(await stub.hit(3, 50)).toBe(true);
+    expect(await stub.claim('AAAAAAAA', 2, 60_000)).toBe(true);
+    await wait(300);
+    await runInDurableObject(stub, async (_instance: unknown, state: DurableObjectState) => {
+      expect(await state.storage.get('hits')).toBeUndefined();
+      expect(Object.keys((await state.storage.get<Record<string, number>>('rooms'))!)).toEqual(['AAAAAAAA']);
+    });
   });
 });
 

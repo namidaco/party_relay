@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { sha256hex } from '../src/util';
-import { type CreateBody, Sock, call, clearDirectory, evictRoom, join, list, makeRoom, wait } from './helpers';
+import {
+  type CreateBody,
+  Sock,
+  call,
+  clearDirectory,
+  connect,
+  directory,
+  evictRoom,
+  inRoom,
+  join,
+  list,
+  makeRoom,
+  wait,
+} from './helpers';
 
 /** mirrors `DIRECTORY_REFRESH_MS` in vitest.config.ts */
 const REFRESH = 400;
@@ -33,6 +46,22 @@ async function summary(sock: Sock, frame: Record<string, unknown>): Promise<void
 
 function codes(res: { body: any }): string[] {
   return res.body.rooms.map((r: any) => r.code);
+}
+
+/** Points the room's directory calls at `dir`. */
+async function fakeDirectory(code: string, dir: Record<string, (...args: any[]) => Promise<unknown>>): Promise<void> {
+  await inRoom(code, (instance: any) => {
+    instance.env = { ...instance.env, DIR: { idFromName: () => null, get: () => dir } };
+    instance.dirStub = null;
+  });
+}
+
+async function storedHid(code: string): Promise<string> {
+  let hid = '';
+  await inRoom(code, async (_instance: any, state: DurableObjectState) => {
+    hid = (await state.storage.get<{ hid: string }>('st'))!.hid;
+  });
+  return hid;
 }
 
 describe('GET /v1/rooms', () => {
@@ -180,7 +209,7 @@ describe('GET /v1/rooms', () => {
     }
   });
 
-  it('derives a stable hid from the creator', async () => {
+  it('derives a stable hid from the creator that a plain hash can not reproduce', async () => {
     await clearDirectory();
     const one = await openRoom({ did: 'same-device' });
     const two = await openRoom({ did: 'same-device' });
@@ -190,9 +219,43 @@ describe('GET /v1/rooms', () => {
     await summary(other.host, { name: 'other' });
 
     const hids = new Map((await list()).body.rooms.map((r: any) => [r.code, r.hid]));
-    expect(hids.get(one.code)).toBe((await sha256hex('same-device')).slice(0, 8));
+    expect(hids.get(one.code)).toMatch(/^[0-9a-f]{8}$/);
+    expect(hids.get(one.code)).not.toBe((await sha256hex('same-device')).slice(0, 8));
+    expect(hids.get(one.code)).toBe(await directory().hid('same-device'));
     expect(hids.get(two.code)).toBe(hids.get(one.code));
     expect(hids.get(other.code)).not.toBe(hids.get(one.code));
+  });
+
+  it('leaves the hid empty with the directory off or not answering', async () => {
+    const off = await makeRoom({}, { DIRECTORY: 'off' });
+    const down = await makeRoom({}, {
+      DIR: {
+        idFromName: () => null,
+        get: () => ({
+          hid: async () => {
+            throw new Error('down');
+          },
+        }),
+      } as any,
+    });
+    expect(await storedHid(off.code)).toBe('');
+    expect(await storedHid(down.code)).toBe('');
+  });
+
+  it('serves a repeated page from the cache, past the rate limit', async () => {
+    await clearDirectory();
+    const room = await openRoom();
+    await summary(room.host, { name: 'cached' });
+    const overrides = { LIST_CACHE_MS: '5000', LIST_RATE_MAX: '1' };
+    expect(codes(await list('?limit=41', overrides, '8.8.6.1'))).toEqual([room.code]);
+    // spellings of the same page share its entry, a cursor that does not parse included
+    for (const query of ['?limit=41', '?limit=041', '?limit=41&after=nonsense']) {
+      const res = await list(query, overrides, '8.8.6.1');
+      expect([query, res.status, codes(res)]).toEqual([query, 200, [room.code]]);
+    }
+    // a miss still counts against the limit, and its 429 is never cached
+    expect((await list('?limit=42', overrides, '8.8.6.1')).status).toBe(429);
+    expect((await list('?limit=42', overrides, '8.8.6.2')).status).toBe(200);
   });
 
   it('rate limits listing per ip', async () => {
@@ -203,6 +266,37 @@ describe('GET /v1/rooms', () => {
     expect(blocked.status).toBe(429);
     expect(blocked.body).toEqual({ error: 'rate_limited' });
     expect((await list('', overrides, '8.8.4.5')).status).toBe(200);
+  });
+});
+
+describe('directory calls', () => {
+  it('never writes back a room closed while a call was out', async () => {
+    await clearDirectory();
+    const room = await openRoom();
+    await summary(room.host, { name: 'slow' });
+    await fakeDirectory(room.code, { put: () => wait(200), remove: () => wait(200) });
+    room.host.send({ t: 'opts', public: false });
+    room.host.send({ t: 'close' });
+    await room.host.waitClosed();
+    await wait(300);
+    await expect(connect(room.code)).rejects.toThrow(/upgrade failed 404/);
+  });
+
+  it('waits for the next refresh after a failed push', async () => {
+    await clearDirectory();
+    const room = await openRoom();
+    await summary(room.host, { name: 'flaky' });
+    let puts = 0;
+    await fakeDirectory(room.code, {
+      put: async () => {
+        puts++;
+        throw new Error('down');
+      },
+      remove: async () => {},
+    });
+    await wait(REFRESH + 50);
+    for (let i = 0; i < 5; i++) await settle(room.host);
+    expect(puts).toBe(1);
   });
 });
 

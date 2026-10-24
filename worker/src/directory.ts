@@ -1,9 +1,10 @@
 import { DurableObject } from 'cloudflare:workers';
-import { DIR_MAX_ENTRIES, DIR_TTL_MS, LIST_RATE_WINDOW, num } from './limits';
+import { DIR_MAX_ENTRIES, DIR_TTL_MS, LIST_RATE_IPS, LIST_RATE_WINDOW, num } from './limits';
 import type { DirEntry, ListQuery, ListResult, PublicRoom, RelayEnv } from './types';
-import { normalizeCode } from './util';
+import { IpLimiter, hmacHex, normalizeCode } from './util';
 
 const PREFIX = 'r:';
+const SECRET = 'hidkey';
 
 interface SortKey {
   members: number;
@@ -14,11 +15,24 @@ interface SortKey {
 /**
  * The single directory instance (`idFromName("global")`): one entry per listed public room, pushed by its room.
  * Entries are pruned on read, so a room that dies without unlisting itself falls out after the ttl.
+ * It also keeps the secret behind every `hid`, generated on first use and never handed out.
  */
 export class DirectoryDO extends DurableObject<RelayEnv> {
   private entries: Map<string, DirEntry> | null = null;
   private sorted: DirEntry[] | null = null;
-  private hits = new Map<string, number[]>();
+  private hits = new IpLimiter(LIST_RATE_WINDOW, LIST_RATE_IPS);
+  private secret: Promise<CryptoKey> | null = null;
+
+  /** First 8 hex of the hmac of a creator identity: stable per creator, and not reversible without the secret. */
+  async hid(identity: string): Promise<string> {
+    const secret = (this.secret ??= this.loadSecret().catch((e: unknown) => {
+      this.secret = null;
+      throw e;
+    }));
+    const key = await secret;
+    const mac = await hmacHex(key, identity);
+    return mac.slice(0, 8);
+  }
 
   async put(entry: DirEntry): Promise<void> {
     const entries = await this.ensure();
@@ -39,7 +53,7 @@ export class DirectoryDO extends DurableObject<RelayEnv> {
   }
 
   async list(q: ListQuery): Promise<ListResult> {
-    if (!this.hit(q.ip, q.rateMax)) return { limited: true, rooms: [], next: null };
+    if (!this.hits.hit(q.ip, q.rateMax)) return { limited: true, rooms: [], next: null };
     const entries = await this.ensure();
     await this.prune(entries, q.ttlMs);
 
@@ -74,15 +88,13 @@ export class DirectoryDO extends DurableObject<RelayEnv> {
     return map;
   }
 
-  private hit(ip: string, max: number): boolean {
-    if (max <= 0) return true;
-    const now = Date.now();
-    if (this.hits.size > 4096) this.hits.clear();
-    const kept = (this.hits.get(ip) ?? []).filter((t) => now - t < LIST_RATE_WINDOW);
-    const allowed = kept.length < max;
-    if (allowed) kept.push(now);
-    this.hits.set(ip, kept);
-    return allowed;
+  private async loadSecret(): Promise<CryptoKey> {
+    let raw = await this.ctx.storage.get<Uint8Array>(SECRET);
+    if (!raw) {
+      raw = crypto.getRandomValues(new Uint8Array(32));
+      await this.ctx.storage.put(SECRET, raw);
+    }
+    return await crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   }
 }
 
@@ -95,6 +107,12 @@ function order(a: SortKey, b: SortKey): number {
 
 function cursorOf(e: SortKey): string {
   return `${e.members}-${e.at}-${e.code}`;
+}
+
+/** The one spelling of a cursor, null for anything that pages from the start. */
+export function normalizeCursor(raw: string | null): string | null {
+  const key = parseCursor(raw);
+  return key ? cursorOf(key) : null;
 }
 
 function parseCursor(raw: string | null): SortKey | null {
